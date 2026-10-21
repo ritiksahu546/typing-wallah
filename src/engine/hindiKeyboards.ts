@@ -34,8 +34,8 @@ export const REMINGTON_GAIL_KEYMAP: Record<string, KeyMapEntry> = {
   'o': { normal: 'द', shift: 'ध' },
   'p': { normal: 'ज', shift: 'झ' },
   '[': { normal: 'ड', shift: 'ढ' },
-  ']': { normal: '़', shift: '|' },
-  '\\': { normal: '़', shift: '|' },
+  ']': { normal: '़', shift: '।' },
+  '\\': { normal: '।', shift: '।' },
 
   // Home row (ASDFGHJKL;')
   'a': { normal: 'ो', shift: 'ओ' },
@@ -59,7 +59,7 @@ export const REMINGTON_GAIL_KEYMAP: Record<string, KeyMapEntry> = {
   'n': { normal: 'ल', shift: 'ळ' },
   'm': { normal: 'स', shift: 'श' },
   ',': { normal: 'य', shift: 'ष' },
-  '.': { normal: 'श', shift: 'श्र' },
+  '.': { normal: 'श', shift: '।' },
   '/': { normal: 'ष', shift: 'ज्ञ' }
 };
 
@@ -93,6 +93,7 @@ export const INSCRIPT_KEYMAP: Record<string, KeyMapEntry> = {
   'p': { normal: 'ज', shift: 'झ' },
   '[': { normal: 'ड', shift: 'ढ' },
   ']': { normal: '़', shift: 'ञ' },
+  '\\': { normal: '।', shift: '।' },
 
   // Home row
   'a': { normal: 'ो', shift: 'ओ' },
@@ -111,13 +112,37 @@ export const INSCRIPT_KEYMAP: Record<string, KeyMapEntry> = {
   'z': { normal: 'ं', shift: 'ँ' },
   'x': { normal: 'म', shift: 'ण' },
   'c': { normal: 'न', shift: 'ळ' },
-  'v': { normal: 'व', shift: '।'},
+  'v': { normal: 'व', shift: '।' },
   'b': { normal: 'ल', shift: '?' },
   'n': { normal: 'स', shift: 'श' },
   'm': { normal: 'य', shift: 'ष' },
   ',': { normal: ',', shift: 'श्र' },
-  '.': { normal: '.', shift: 'ज्ञ' },
+  '.': { normal: '.', shift: '।' },
   '/': { normal: '/', shift: '?' }
+};
+
+const SHIFTED_SYMBOL_TO_BASE: Record<string, string> = {
+  '~': '`',
+  '!': '1',
+  '@': '2',
+  '#': '3',
+  '$': '4',
+  '%': '5',
+  '^': '6',
+  '&': '7',
+  '*': '8',
+  '(': '9',
+  ')': '0',
+  '_': '-',
+  '+': '=',
+  '{': '[',
+  '}': ']',
+  '|': '\\',
+  ':': ';',
+  '"': "'",
+  '<': ',',
+  '>': '.',
+  '?': '/'
 };
 
 /**
@@ -136,13 +161,70 @@ export function translatePhysicalKeyToHindi(
   isShift: boolean,
   layout: HindiKeyboardLayout
 ): string | null {
-  const map = layout === 'remington_gail' ? REMINGTON_GAIL_KEYMAP : INSCRIPT_KEYMAP;
-  const lowerKey = key.toLowerCase();
+  if (!key || key === ' ' || key === '\n' || key === '\t') {
+    return null;
+  }
 
+  const map = layout === 'remington_gail' ? REMINGTON_GAIL_KEYMAP : INSCRIPT_KEYMAP;
+
+  // Handle shifted punctuation characters reported by browser KeyboardEvent.key
+  if (SHIFTED_SYMBOL_TO_BASE[key]) {
+    const baseKey = SHIFTED_SYMBOL_TO_BASE[key];
+    const entry = map[baseKey];
+    if (entry) {
+      return entry.shift;
+    }
+  }
+
+  const lowerKey = key.toLowerCase();
   const entry = map[lowerKey] || map[key];
   if (!entry) {
     return null;
   }
 
   return isShift ? entry.shift : entry.normal;
+}
+
+/**
+ * Converts newly inserted ASCII characters in an input/textarea change event
+ * into Hindi Devanagari characters (fallback for mobile/virtual keyboards where onKeyDown sends 'Unidentified').
+ */
+export function transliterateNewInputToHindi(
+  prevText: string,
+  nextText: string,
+  layout: HindiKeyboardLayout
+): string {
+  if (nextText.length <= prevText.length) {
+    return nextText;
+  }
+
+  let prefixLen = 0;
+  const minLen = Math.min(prevText.length, nextText.length);
+  while (prefixLen < minLen && prevText[prefixLen] === nextText[prefixLen]) {
+    prefixLen++;
+  }
+
+  let suffixLen = 0;
+  while (
+    suffixLen < minLen - prefixLen &&
+    prevText[prevText.length - 1 - suffixLen] === nextText[nextText.length - 1 - suffixLen]
+  ) {
+    suffixLen++;
+  }
+
+  const inserted = nextText.slice(prefixLen, nextText.length - suffixLen);
+  let converted = '';
+
+  for (const ch of inserted) {
+    if (ch === ' ' || ch === '\n' || ch === '\t' || isDevanagari(ch)) {
+      converted += ch;
+      continue;
+    }
+    const isUpperAlpha = ch >= 'A' && ch <= 'Z';
+    const isShiftedSym = Boolean(SHIFTED_SYMBOL_TO_BASE[ch]);
+    const mapped = translatePhysicalKeyToHindi(ch, isUpperAlpha || isShiftedSym, layout);
+    converted += mapped ?? ch;
+  }
+
+  return nextText.slice(0, prefixLen) + converted + nextText.slice(nextText.length - suffixLen);
 }

@@ -33,9 +33,20 @@ export interface ExamScoreResult extends TypingMetrics {
  * Half mistake = Case mismatch (Capital/Small), punctuation mistake, or minor spelling transposition.
  * NOTE: Untyped words at the end of the passage are NOT mistakes; they are pending words.
  */
-export function analyzeMistakes(typedText: string, targetText: string): DetailedMistakes {
-  const targetWords = targetText.trim().split(/\s+/).filter(Boolean);
-  const typedWords = typedText.trim().split(/\s+/).filter(Boolean);
+export function analyzeMistakes(typedText: string, targetText: string, includeInProgressLastWord = false): DetailedMistakes {
+  const normTarget = targetText.normalize('NFC');
+  const normTyped = typedText.normalize('NFC');
+
+  const targetWords = normTarget.trim().split(/\s+/).filter(Boolean);
+  const allTypedWords = normTyped.trim().split(/\s+/).filter(Boolean);
+
+  // If the user is currently in the middle of typing the last word (no trailing space),
+  // do not evaluate that incomplete word as a completed word mistake unless explicitly requested
+  const hasTrailingSpace = /\s$/.test(normTyped);
+  const typedWords =
+    !includeInProgressLastWord && allTypedWords.length > 0 && !hasTrailingSpace
+      ? allTypedWords.slice(0, -1)
+      : allTypedWords;
 
   let fullMistakes = 0;
   let halfMistakes = 0;
@@ -100,9 +111,9 @@ export function analyzeMistakes(typedText: string, targetText: string): Detailed
       continue;
     }
 
-    // 5. Check if difference is punctuation (Half mistake)
-    const cleanTgt = tgt.replace(/[.,/#!$%^&*;:{}=\-_`~()?"']/g, '');
-    const cleanTyp = typ.replace(/[.,/#!$%^&*;:{}=\-_`~()?"']/g, '');
+    // 5. Check if difference is punctuation (Half mistake, including Hindi Purna Viram '।')
+    const cleanTgt = tgt.replace(/[.,/#!$%^&*;:{}=\-_`~()?"'।]/g, '');
+    const cleanTyp = typ.replace(/[.,/#!$%^&*;:{}=\-_`~()?"'।]/g, '');
     if (cleanTgt.length > 0 && cleanTgt.toLowerCase() === cleanTyp.toLowerCase()) {
       halfMistakes += 1;
       punctuationErrors += 1;
@@ -110,9 +121,9 @@ export function analyzeMistakes(typedText: string, targetText: string): Detailed
       continue;
     }
 
-    // 6. Check edit distance for minor spelling error (Levenshtein distance <= 2 is half mistake, otherwise full mistake)
+    // 6. Check edit distance for minor spelling error (1 char typo or <= 2 on 4+ char word is half mistake)
     const dist = levenshteinDistance(tgt, typ);
-    if (dist <= 2 && tgt.length >= 4) {
+    if (dist === 1 || (dist <= 2 && tgt.length >= 4)) {
       halfMistakes += 1;
       spellingErrors += 1;
     } else {
@@ -169,13 +180,19 @@ export function calculateExamScore(
   examId?: ExamId | 'general',
   language: 'english' | 'hindi' = 'english'
 ): ExamScoreResult {
-  const safeElapsedMinutes = Math.max(elapsedSeconds / 60, 1 / 60);
-  const remainingSeconds = Math.max(0, totalDurationSeconds - elapsedSeconds);
+  const normTyped = typedText.normalize('NFC');
+  const normTarget = targetText.normalize('NFC');
 
-  const targetWords = targetText.trim().split(/\s+/).filter(Boolean);
-  const typedWords = typedText.trim().split(/\s+/).filter(Boolean);
+  // Stabilize elapsed time (min 1.5s when active) so WPM does not spike on the first keystroke
+  const effectiveElapsedSeconds = normTyped.length > 0 ? Math.max(elapsedSeconds, 1.5) : Math.max(elapsedSeconds, 1);
+  const safeElapsedMinutes = effectiveElapsedSeconds / 60;
+  const remainingSeconds = Math.max(0, Math.ceil(totalDurationSeconds - elapsedSeconds));
 
-  // Word-aligned character accuracy calculation
+  const targetWords = normTarget.trim().split(/\s+/).filter(Boolean);
+  const typedWords = normTyped.trim().split(/\s+/).filter(Boolean);
+  const hasTrailingSpace = /\s$/.test(normTyped);
+
+  // Word-aligned character accuracy calculation (without inflating totalChars beyond normTyped.length)
   let correctChars = 0;
   let incorrectChars = 0;
 
@@ -183,51 +200,78 @@ export function calculateExamScore(
   for (let i = 0; i < typedWords.length; i++) {
     const typ = typedWords[i];
     const tgt = targetWords[alignTgtIdx];
+    const isLastWord = i === typedWords.length - 1;
+    const isInProgressWord = isLastWord && !hasTrailingSpace;
+    const wordHasSpaceAfter = !isLastWord || hasTrailingSpace;
 
     if (!tgt) {
-      incorrectChars += typ.length + 1;
+      incorrectChars += typ.length + (wordHasSpaceAfter ? 1 : 0);
       continue;
     }
 
-    if (typ === tgt) {
-      // Exact word match: all letters + space are correct
-      correctChars += typ.length + 1;
-      alignTgtIdx++;
-    } else if (alignTgtIdx + 1 < targetWords.length && targetWords[alignTgtIdx + 1] === typ) {
-      // Candidate skipped tgt, current typ matches next target word
-      correctChars += typ.length + 1;
-      alignTgtIdx += 2;
-    } else if (i + 1 < typedWords.length && typedWords[i + 1] === tgt) {
-      // Candidate inserted an extra word
-      incorrectChars += typ.length + 1;
-    } else {
-      // Compare character by character within this word
-      const minLen = Math.min(typ.length, tgt.length);
-      for (let c = 0; c < minLen; c++) {
-        if (typ[c] === tgt[c]) {
+    if (isInProgressWord) {
+      // User is still typing this word: only evaluate the characters typed so far
+      for (let c = 0; c < typ.length; c++) {
+        if (c < tgt.length && typ[c] === tgt[c]) {
           correctChars++;
         } else {
           incorrectChars++;
         }
       }
-      incorrectChars += Math.abs(typ.length - tgt.length);
-      correctChars++; // Trailing space counted
+      alignTgtIdx++;
+      continue;
+    }
+
+    if (typ === tgt) {
+      // Exact completed word match: all letters + trailing space are correct
+      correctChars += typ.length + (wordHasSpaceAfter ? 1 : 0);
+      alignTgtIdx++;
+    } else if (alignTgtIdx + 1 < targetWords.length && targetWords[alignTgtIdx + 1] === typ) {
+      // Candidate skipped tgt, current typ matches next target word
+      correctChars += typ.length + (wordHasSpaceAfter ? 1 : 0);
+      alignTgtIdx += 2;
+    } else if (i + 1 < typedWords.length && typedWords[i + 1] === tgt) {
+      // Candidate inserted an extra word
+      incorrectChars += typ.length + (wordHasSpaceAfter ? 1 : 0);
+    } else {
+      // Completed word with mismatch: compare character by character up to typ.length
+      for (let c = 0; c < typ.length; c++) {
+        if (c < tgt.length && typ[c] === tgt[c]) {
+          correctChars++;
+        } else {
+          incorrectChars++;
+        }
+      }
+      if (wordHasSpaceAfter) {
+        // If user pressed space early before completing the word, the space itself was premature
+        if (typ.length < tgt.length) {
+          incorrectChars++;
+        } else {
+          correctChars++;
+        }
+      }
       alignTgtIdx++;
     }
   }
 
-  const totalChars = Math.max(typedText.length, correctChars + incorrectChars);
+  const totalChars = normTyped.length;
+  correctChars = Math.min(totalChars, correctChars);
+  incorrectChars = Math.max(0, totalChars - correctChars);
+
   const keyDepressions = totalChars;
-  const kdph = Math.round((keyDepressions / safeElapsedMinutes) * 60);
+  const kdph = totalChars > 0 && elapsedSeconds > 0 ? Math.round((keyDepressions / safeElapsedMinutes) * 60) : 0;
 
   // Standard word conversion: 5 characters / keystrokes = 1 word
   const grossWords = totalChars / 5;
-  const grossWpm = Math.round(grossWords / safeElapsedMinutes);
+  const grossWpm = totalChars > 0 && elapsedSeconds > 0 ? Math.round(grossWords / safeElapsedMinutes) : 0;
 
-  // Detailed full and half mistakes evaluation
-  const mistakesDetail = analyzeMistakes(typedText, targetText);
+  // Detailed full and half mistakes evaluation (only on completed words)
+  const mistakesDetail = analyzeMistakes(normTyped, normTarget, false);
   const accuracy = totalChars > 0 ? Number(((correctChars / totalChars) * 100).toFixed(1)) : 100;
   const errorPercentage = totalChars > 0 ? Number(((incorrectChars / totalChars) * 100).toFixed(2)) : 0;
+
+  // Effective mistake words accounts for both word-level mistakes and raw mistyped character spans
+  const effectiveMistakeWords = Math.max(mistakesDetail.totalMistakes, incorrectChars / 5);
 
   // Initialize scoring variables
   let netWpm = 0;
@@ -258,9 +302,9 @@ export function calculateExamScore(
       targetSpeed = reqSpeed;
 
       penaltyMistakes = mistakesDetail.totalMistakes;
-      penaltyDeductionWords = penaltyMistakes;
+      penaltyDeductionWords = effectiveMistakeWords;
       const netWords = Math.max(0, grossWords - penaltyDeductionWords);
-      netWpm = Math.max(0, Math.round(netWords / safeElapsedMinutes));
+      netWpm = totalChars > 0 && elapsedSeconds > 0 ? Math.max(0, Math.round(netWords / safeElapsedMinutes)) : 0;
       isQualified = netWpm >= reqSpeed && accuracy >= 90;
 
       if (isQualified) {
@@ -278,11 +322,11 @@ export function calculateExamScore(
       // Allowed mistakes = 5% of Total Words Typed (TWT)
       // Mistakes beyond 5% attract 10x word deduction
       scoringFormulaName = 'Indian Railways RRB NTPC (5% Free + 10x Excess Penalty)';
-      allowedMistakes = Math.round(grossWords * 0.05);
-      penaltyMistakes = Math.max(0, mistakesDetail.totalMistakes - allowedMistakes);
-      penaltyDeductionWords = penaltyMistakes * 10;
-      const netWords = Math.max(0, grossWords - penaltyDeductionWords);
-      netWpm = Math.max(0, Math.round(netWords / safeElapsedMinutes));
+      allowedMistakes = Number((grossWords * 0.05).toFixed(1));
+      penaltyMistakes = Number(Math.max(0, mistakesDetail.totalMistakes - allowedMistakes).toFixed(1));
+      penaltyDeductionWords = Number((penaltyMistakes * 10).toFixed(1));
+      const netWords = Math.max(0, grossWords - Math.max(penaltyDeductionWords, incorrectChars / 5));
+      netWpm = totalChars > 0 && elapsedSeconds > 0 ? Math.max(0, Math.round(netWords / safeElapsedMinutes)) : 0;
 
       const requiredSpeed = language === 'hindi' ? 25 : 30;
       isQualified = netWpm >= requiredSpeed && accuracy >= 85;
@@ -302,14 +346,14 @@ export function calculateExamScore(
       // Based on percentage of full & half mistakes and required key depressions (1,750 for English, 1,500 for Hindi)
       scoringFormulaName = 'SSC CHSL Tier-II Mistake Evaluation (Full & Half Mistakes)';
       const targetKD = language === 'hindi' ? 1500 : 1750;
-      const targetKDPH = language === 'hindi' ? 9000 : 10500;
       targetSpeed = language === 'hindi' ? 30 : 35;
       const maxAllowedErrorPercent = examConfig?.allowedErrorPercent || 7;
 
       // In SSC: Net WPM = Gross WPM - (Mistakes / elapsedMinutes)
-      netWpm = Math.max(0, Math.round(grossWpm - (mistakesDetail.totalMistakes / safeElapsedMinutes)));
+      const netWords = Math.max(0, grossWords - effectiveMistakeWords);
+      netWpm = totalChars > 0 && elapsedSeconds > 0 ? Math.max(0, Math.round(netWords / safeElapsedMinutes)) : 0;
       const mistakePercent = grossWords > 0
-        ? Number(((mistakesDetail.totalMistakes / grossWords) * 100).toFixed(2))
+        ? Number(((effectiveMistakeWords / grossWords) * 100).toFixed(2))
         : 0;
 
       const meetsKD = keyDepressions >= (targetKD * (elapsedSeconds / totalDurationSeconds) * 0.95);
@@ -334,9 +378,10 @@ export function calculateExamScore(
       targetSpeed = 8000;
       const maxAllowedErrorPercent = examConfig?.allowedErrorPercent || 5;
 
-      netWpm = Math.max(0, Math.round(grossWpm - (mistakesDetail.totalMistakes / safeElapsedMinutes)));
+      const netWords = Math.max(0, grossWords - effectiveMistakeWords);
+      netWpm = totalChars > 0 && elapsedSeconds > 0 ? Math.max(0, Math.round(netWords / safeElapsedMinutes)) : 0;
       const mistakePercent = grossWords > 0
-        ? Number(((mistakesDetail.totalMistakes / grossWords) * 100).toFixed(2))
+        ? Number(((effectiveMistakeWords / grossWords) * 100).toFixed(2))
         : 0;
 
       const meetsKD = kdph >= 7600; // Target approx 8000 KDPH
@@ -360,8 +405,8 @@ export function calculateExamScore(
       const reqSpeed = language === 'hindi' ? 20 : 30;
       targetSpeed = reqSpeed;
 
-      const netWords = Math.max(0, grossWords - mistakesDetail.totalMistakes);
-      netWpm = Math.max(0, Math.round(netWords / safeElapsedMinutes));
+      const netWords = Math.max(0, grossWords - effectiveMistakeWords);
+      netWpm = totalChars > 0 && elapsedSeconds > 0 ? Math.max(0, Math.round(netWords / safeElapsedMinutes)) : 0;
       isQualified = netWpm >= reqSpeed && accuracy >= 80;
 
       if (isQualified) {
@@ -381,9 +426,9 @@ export function calculateExamScore(
       targetSpeed = reqSpeed;
 
       penaltyMistakes = mistakesDetail.totalMistakes;
-      penaltyDeductionWords = penaltyMistakes;
+      penaltyDeductionWords = effectiveMistakeWords;
       const netWords = Math.max(0, grossWords - penaltyDeductionWords);
-      netWpm = Math.max(0, Math.round(netWords / safeElapsedMinutes));
+      netWpm = totalChars > 0 && elapsedSeconds > 0 ? Math.max(0, Math.round(netWords / safeElapsedMinutes)) : 0;
       isQualified = netWpm >= reqSpeed && accuracy >= 90;
 
       if (isQualified) {
@@ -401,9 +446,10 @@ export function calculateExamScore(
       scoringFormulaName = 'Supreme Court of India JCA (35 WPM, Max 3% Error Limit)';
       targetSpeed = 35;
       const mistakePercent = grossWords > 0
-        ? Number(((mistakesDetail.totalMistakes / grossWords) * 100).toFixed(2))
+        ? Number(((effectiveMistakeWords / grossWords) * 100).toFixed(2))
         : 0;
-      netWpm = Math.max(0, Math.round(grossWpm - (mistakesDetail.totalMistakes / safeElapsedMinutes)));
+      const netWords = Math.max(0, grossWords - effectiveMistakeWords);
+      netWpm = totalChars > 0 && elapsedSeconds > 0 ? Math.max(0, Math.round(netWords / safeElapsedMinutes)) : 0;
       isQualified = netWpm >= 35 && mistakePercent <= 3.0;
 
       if (isQualified) {
@@ -422,9 +468,10 @@ export function calculateExamScore(
       const reqSpeed = language === 'hindi' ? 30 : 35;
       targetSpeed = reqSpeed;
       const mistakePercent = grossWords > 0
-        ? Number(((mistakesDetail.totalMistakes / grossWords) * 100).toFixed(2))
+        ? Number(((effectiveMistakeWords / grossWords) * 100).toFixed(2))
         : 0;
-      netWpm = Math.max(0, Math.round(grossWpm - (mistakesDetail.totalMistakes / safeElapsedMinutes)));
+      const netWords = Math.max(0, grossWords - effectiveMistakeWords);
+      netWpm = totalChars > 0 && elapsedSeconds > 0 ? Math.max(0, Math.round(netWords / safeElapsedMinutes)) : 0;
       isQualified = netWpm >= reqSpeed && mistakePercent <= 2.0;
 
       if (isQualified) {
@@ -443,9 +490,10 @@ export function calculateExamScore(
       const reqSpeed = language === 'hindi' ? 30 : 35;
       targetSpeed = reqSpeed;
       const mistakePercent = grossWords > 0
-        ? Number(((mistakesDetail.totalMistakes / grossWords) * 100).toFixed(2))
+        ? Number(((effectiveMistakeWords / grossWords) * 100).toFixed(2))
         : 0;
-      netWpm = Math.max(0, Math.round(grossWpm - (mistakesDetail.totalMistakes / safeElapsedMinutes)));
+      const netWords = Math.max(0, grossWords - effectiveMistakeWords);
+      netWpm = totalChars > 0 && elapsedSeconds > 0 ? Math.max(0, Math.round(netWords / safeElapsedMinutes)) : 0;
       isQualified = netWpm >= reqSpeed && mistakePercent <= 5.0;
 
       if (isQualified) {
@@ -463,8 +511,8 @@ export function calculateExamScore(
       scoringFormulaName = 'Delhi Police HCM Standard (30 WPM English / 25 WPM Hindi)';
       const reqSpeed = language === 'hindi' ? 25 : 30;
       targetSpeed = reqSpeed;
-      const netWords = Math.max(0, grossWords - mistakesDetail.totalMistakes);
-      netWpm = Math.max(0, Math.round(netWords / safeElapsedMinutes));
+      const netWords = Math.max(0, grossWords - effectiveMistakeWords);
+      netWpm = totalChars > 0 && elapsedSeconds > 0 ? Math.max(0, Math.round(netWords / safeElapsedMinutes)) : 0;
       isQualified = netWpm >= reqSpeed && accuracy >= 90;
 
       if (isQualified) {
@@ -480,8 +528,8 @@ export function calculateExamScore(
       scoringFormulaName = 'UPSSSC Typing Standard (30 WPM English / 25 WPM Hindi)';
       const reqSpeed = language === 'hindi' ? 25 : 30;
       targetSpeed = reqSpeed;
-      const netWords = Math.max(0, grossWords - mistakesDetail.totalMistakes);
-      netWpm = Math.max(0, Math.round(netWords / safeElapsedMinutes));
+      const netWords = Math.max(0, grossWords - effectiveMistakeWords);
+      netWpm = totalChars > 0 && elapsedSeconds > 0 ? Math.max(0, Math.round(netWords / safeElapsedMinutes)) : 0;
       isQualified = netWpm >= reqSpeed && accuracy >= 85;
 
       if (isQualified) {
@@ -495,8 +543,8 @@ export function calculateExamScore(
     default: {
       // Standard Practice Mode / General
       scoringFormulaName = 'Standard Net WPM Evaluation';
-      const netWords = Math.max(0, grossWords - mistakesDetail.totalMistakes);
-      netWpm = Math.max(0, Math.round(netWords / safeElapsedMinutes));
+      const netWords = Math.max(0, grossWords - effectiveMistakeWords);
+      netWpm = totalChars > 0 && elapsedSeconds > 0 ? Math.max(0, Math.round(netWords / safeElapsedMinutes)) : 0;
       isQualified = netWpm >= 30 && accuracy >= 90;
       qualificationReason = isQualified
         ? `Qualified: Good performance! Net speed: ${netWpm} WPM with ${accuracy}% accuracy.`

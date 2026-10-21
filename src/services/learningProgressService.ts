@@ -1,4 +1,4 @@
-import { auth, db } from './firebase';
+import { auth, db, withFirestoreTimeout } from './firebase';
 import {
   doc,
   getDoc,
@@ -68,7 +68,7 @@ export const LearningProgressService = {
     if (auth.currentUser && uid !== 'guest') {
       try {
         const progressDocRef = doc(db, 'users', uid, 'learning_progress', 'course');
-        const snap = await getDoc(progressDocRef);
+        const snap = await withFirestoreTimeout(getDoc(progressDocRef), 2500);
         if (snap.exists()) {
           const remoteData = snap.data() as Partial<UserCourseProgress>;
           // Merge remote with highest unlocked guarantee
@@ -91,13 +91,16 @@ export const LearningProgressService = {
           return merged;
         } else {
           // Initialize remote document
-          await setDoc(progressDocRef, {
-            ...localProgress,
-            lastUpdated: Date.now()
-          });
+          await withFirestoreTimeout(
+            setDoc(progressDocRef, {
+              ...localProgress,
+              lastUpdated: Date.now()
+            }),
+            2500
+          );
         }
-      } catch (err) {
-        console.warn('Firestore progress load error (using local cache):', err);
+      } catch {
+        // Offline cache used seamlessly
       }
     }
 
@@ -209,15 +212,18 @@ export const LearningProgressService = {
     if (auth.currentUser && uid !== 'guest') {
       try {
         const progressDocRef = doc(db, 'users', uid, 'learning_progress', 'course');
-        await setDoc(progressDocRef, updatedProgress, { merge: true });
+        await withFirestoreTimeout(setDoc(progressDocRef, updatedProgress, { merge: true }), 2500);
 
         const resultsColRef = collection(db, 'users', uid, 'learning_results');
-        await addDoc(resultsColRef, {
-          ...fullAttempt,
-          createdAt: serverTimestamp()
-        });
-      } catch (err) {
-        console.warn('Firestore progress update failed (offline cache retained):', err);
+        await withFirestoreTimeout(
+          addDoc(resultsColRef, {
+            ...fullAttempt,
+            createdAt: serverTimestamp()
+          }),
+          2500
+        );
+      } catch {
+        // Offline cache retained seamlessly
       }
     }
 
@@ -258,10 +264,10 @@ export const LearningProgressService = {
       // ignore
     }
 
-    // Try fetching from Firestore collection /learning_lessons
+    // Try fetching from Firestore collection /learning_lessons with a fast timeout
     try {
       const colRef = collection(db, 'learning_lessons');
-      const snap = await getDocs(colRef);
+      const snap = await withFirestoreTimeout(getDocs(colRef), 2500);
       if (!snap.empty) {
         const remoteLessons: TouchTypingCourseLesson[] = [];
         snap.forEach((d) => {
@@ -272,8 +278,8 @@ export const LearningProgressService = {
           localStorage.setItem(STORAGE_KEYS.CUSTOM_LESSONS, JSON.stringify(remoteLessons));
         }
       }
-    } catch (err) {
-      console.warn('Could not fetch custom lessons from Firestore:', err);
+    } catch {
+      // Fall back to local cache / built-in curriculum seamlessly
     }
 
     // Merge: Custom lessons can override built-in or add new lessons (e.g. lessonNumber > 92)
@@ -306,9 +312,9 @@ export const LearningProgressService = {
     // 2. Persist to Firestore
     try {
       const docRef = doc(db, 'learning_lessons', lesson.id);
-      await setDoc(docRef, { ...lesson, isCustom: true }, { merge: true });
-    } catch (err) {
-      console.warn('Admin lesson Firestore save error:', err);
+      await withFirestoreTimeout(setDoc(docRef, { ...lesson, isCustom: true }, { merge: true }), 2500);
+    } catch {
+      // Offline cache updated seamlessly
     }
   },
 

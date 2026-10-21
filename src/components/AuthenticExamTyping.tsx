@@ -10,7 +10,7 @@ import {
 import { EXAMS_DATA } from '../data/exams';
 import { PASSAGES_DATA } from '../data/passages';
 import { calculateTypingMetrics } from '../engine/metrics';
-import { translatePhysicalKeyToHindi } from '../engine/hindiKeyboards';
+import { translatePhysicalKeyToHindi, transliterateNewInputToHindi } from '../engine/hindiKeyboards';
 import { StorageService } from '../services/storageService';
 import { ResultModal } from './ResultModal';
 import { SubscriptionModal } from './SubscriptionModal';
@@ -69,7 +69,9 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
   const [wordLimit, setWordLimit] = useState<'all' | '100' | '200' | '300' | '420'>('420');
 
   // Passage selection
-  const [selectedPassageId, setSelectedPassageId] = useState<string>('eng-free-02');
+  const [selectedPassageId, setSelectedPassageId] = useState<string>(
+    initialLanguage === 'hindi' ? 'hin-free-01' : 'eng-free-02'
+  );
   const [isPassageDropdownOpen, setIsPassageDropdownOpen] = useState<boolean>(false);
   const [passageSearchQuery, setPassageSearchQuery] = useState<string>('');
 
@@ -80,11 +82,11 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
   const [showEarlySubmitModal, setShowEarlySubmitModal] = useState<boolean>(false);
   const [activeResult, setActiveResult] = useState<TestResultRecord | null>(null);
 
-  // User Settings
+  // User Settings (Virtual Hindi QWERTY->Devanagari converter enabled by default)
   const [fontSize, setFontSize] = useState<'normal' | 'large' | 'xlarge'>('large');
   const [soundEnabled, setSoundEnabled] = useState<boolean>(false);
   const [disableBackspace, setDisableBackspace] = useState<boolean>(false);
-  const [useVirtualRemington, setUseVirtualRemington] = useState<boolean>(false);
+  const [useVirtualRemington, setUseVirtualRemington] = useState<boolean>(true);
   const [backspaceWarning, setBackspaceWarning] = useState<boolean>(false);
 
   // Typing Session State
@@ -98,9 +100,23 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
   // Refs
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const timerRef = useRef<number | null>(null);
+  const startTimeRef = useRef<number | null>(null);
   const activeWordRef = useRef<HTMLSpanElement | null>(null);
   const referenceContainerRef = useRef<HTMLDivElement | null>(null);
   const dropdownRef = useRef<HTMLDivElement | null>(null);
+
+  // Sync props when navigating with new initial language/exam/layout
+  useEffect(() => {
+    setSelectedExamId(initialExamId);
+    setLanguage(initialLanguage);
+    setDurationSeconds(initialDuration);
+    setKeyboardLayout(initialLayout);
+    setSelectedCategory('All');
+    const firstForLang = PASSAGES_DATA.find((p) => p.language === initialLanguage);
+    if (firstForLang) {
+      setSelectedPassageId(firstForLang.id);
+    }
+  }, [initialExamId, initialLanguage, initialDuration, initialLayout]);
 
   // Candidate Name
   const candidateName = user?.name && user.name.trim() !== '' && user.name !== 'Candidate'
@@ -110,10 +126,15 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
   // Get Exam Data
   const currentExam = EXAMS_DATA[selectedExamId] || EXAMS_DATA['high-court'] || EXAMS_DATA['cpct'];
 
-  // Filter passages
+  // Filter passages by active language
   const availablePassages = useMemo(() => {
     return PASSAGES_DATA.filter((p) => p.language === language);
   }, [language]);
+
+  const availableCategories = useMemo(() => {
+    const cats = Array.from(new Set(availablePassages.map((p) => p.category).filter(Boolean))) as string[];
+    return ['All', ...cats];
+  }, [availablePassages]);
 
   const filteredPassages = useMemo(() => {
     let list = availablePassages;
@@ -132,10 +153,10 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
     return list;
   }, [availablePassages, selectedCategory, passageSearchQuery]);
 
-  // Active Passage
+  // Active Passage (strictly scoped to availablePassages of current language)
   const activePassage = useMemo(() => {
     return (
-      PASSAGES_DATA.find((p) => p.id === selectedPassageId) ||
+      availablePassages.find((p) => p.id === selectedPassageId) ||
       availablePassages[0] ||
       PASSAGES_DATA[0]
     );
@@ -187,30 +208,41 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
     : Math.max(0, typedWords.length - 1);
   const pendingWordsCount = Math.max(0, totalWordsCount - completedWordsCount);
 
+  // Compute exact wall-clock elapsed seconds for accurate speed calculation
+  const effectiveElapsed = useMemo(() => {
+    if (typedText.length === 0) return 0;
+    if (startTimeRef.current) {
+      const wallElapsed = (Date.now() - startTimeRef.current) / 1000;
+      return Math.min(durationSeconds, Math.max(elapsedSeconds, wallElapsed, 1.5));
+    }
+    return Math.max(elapsedSeconds, 1.5);
+  }, [typedText.length, elapsedSeconds, durationSeconds]);
+
   // Real-time metrics computed via master exam scoring engine
   const liveMetrics = useMemo(() => {
     return calculateTypingMetrics(
       typedText,
       targetText,
-      Math.max(1, elapsedSeconds),
+      effectiveElapsed,
       durationSeconds,
       backspaceCount,
       selectedExamId,
       language
     );
-  }, [typedText, targetText, elapsedSeconds, durationSeconds, backspaceCount, selectedExamId, language]);
+  }, [typedText, targetText, effectiveElapsed, durationSeconds, backspaceCount, selectedExamId, language]);
 
   // Speed Metrics & Error Counts
   const errorCount = liveMetrics.mistakesDetail.totalMistakes;
-  const grossWpm = elapsedSeconds > 0 ? liveMetrics.grossWpm : 0;
-  const netWpm = elapsedSeconds > 0 ? liveMetrics.netWpm : 0;
-  const accuracy = elapsedSeconds > 0 ? liveMetrics.accuracy : 100;
+  const grossWpm = typedText.length > 0 ? liveMetrics.grossWpm : 0;
+  const netWpm = typedText.length > 0 ? liveMetrics.netWpm : 0;
+  const accuracy = typedText.length > 0 ? liveMetrics.accuracy : 100;
 
   // Remaining time
-  const remainingSeconds = Math.max(0, durationSeconds - elapsedSeconds);
+  const remainingSeconds = Math.max(0, durationSeconds - Math.floor(elapsedSeconds));
   const formatTime = (secs: number) => {
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
+    const wholeSecs = Math.max(0, Math.floor(secs));
+    const m = Math.floor(wholeSecs / 60);
+    const s = wholeSecs % 60;
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
@@ -238,10 +270,14 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
     setIsActive(false);
     setIsFinished(true);
 
+    const finalElapsed = startTimeRef.current
+      ? Math.min(durationSeconds, Math.max(1.5, (Date.now() - startTimeRef.current) / 1000))
+      : Math.max(1.5, elapsedSeconds);
+
     const metrics = calculateTypingMetrics(
       typedText,
       targetText,
-      Math.max(1, elapsedSeconds),
+      finalElapsed,
       durationSeconds,
       backspaceCount,
       selectedExamId,
@@ -255,7 +291,7 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
       examName: currentExam.name,
       language,
       keyboardLayout: language === 'hindi' ? keyboardLayout : 'standard',
-      durationSeconds,
+      durationSeconds: Math.round(finalElapsed),
       passageTitle: activePassage.title,
       passageId: activePassage.id,
       metrics
@@ -277,29 +313,39 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
     activePassage.id
   ]);
 
-  // Timer Tick
+  // High-precision wall-clock timer tick (does NOT depend on finishTest so typing never resets the interval)
   useEffect(() => {
     if (isActive && !isFinished) {
+      if (!startTimeRef.current) {
+        startTimeRef.current = Date.now() - elapsedSeconds * 1000;
+      }
       timerRef.current = window.setInterval(() => {
-        setElapsedSeconds((prev) => {
-          const next = prev + 1;
-          if (next >= durationSeconds) {
-            clearInterval(timerRef.current!);
-            finishTest();
-            return durationSeconds;
-          }
-          return next;
-        });
-      }, 1000);
+        if (!startTimeRef.current) return;
+        const nextElapsed = (Date.now() - startTimeRef.current) / 1000;
+        if (nextElapsed >= durationSeconds) {
+          setElapsedSeconds(durationSeconds);
+          if (timerRef.current) clearInterval(timerRef.current);
+        } else {
+          setElapsedSeconds(nextElapsed);
+        }
+      }, 250);
     }
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [isActive, isFinished, durationSeconds, finishTest]);
+  }, [isActive, isFinished, durationSeconds]);
+
+  // Trigger test completion when time expires
+  useEffect(() => {
+    if (isActive && !isFinished && elapsedSeconds >= durationSeconds && durationSeconds > 0) {
+      finishTest();
+    }
+  }, [isActive, isFinished, elapsedSeconds, durationSeconds, finishTest]);
 
   // Reset Session
   const handleReset = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
+    startTimeRef.current = null;
     setTypedText('');
     setElapsedSeconds(0);
     setIsActive(false);
@@ -344,10 +390,17 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
   // Handle Input Changes
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     if (isFinished) return;
-    if (!isActive && e.target.value.length > 0) {
+    let val = e.target.value;
+    if (!isActive && val.length > 0) {
+      if (!startTimeRef.current) startTimeRef.current = Date.now();
       setIsActive(true);
     }
-    setTypedText(e.target.value);
+    if (language === 'hindi' && useVirtualRemington && val.length > typedText.length) {
+      val = transliterateNewInputToHindi(typedText, val, keyboardLayout);
+    }
+    // Collapse consecutive spaces or leading space to keep word alignment accurate
+    val = val.replace(/^\s+/, '').replace(/ {2,}/g, ' ');
+    setTypedText(val);
     playKeyClick();
   };
 
@@ -355,8 +408,15 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (isFinished) return;
 
+    // Prevent leading space or consecutive spaces from shifting word alignment
+    if (e.key === ' ' && (typedText.length === 0 || typedText.endsWith(' '))) {
+      e.preventDefault();
+      return;
+    }
+
     // Start on first key
-    if (!isActive) {
+    if (!isActive && e.key.length === 1) {
+      if (!startTimeRef.current) startTimeRef.current = Date.now();
       setIsActive(true);
     }
 
@@ -376,18 +436,28 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
       return;
     }
 
-    // Hindi Direct Transliteration
-    if (language === 'hindi' && useVirtualRemington && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
-      e.preventDefault();
+    // Hindi Direct Transliteration (maps physical English QWERTY keys to Hindi Devanagari)
+    if (
+      language === 'hindi' &&
+      useVirtualRemington &&
+      e.key.length === 1 &&
+      e.key !== ' ' &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      !e.metaKey
+    ) {
       const hindiChar = translatePhysicalKeyToHindi(e.key, e.shiftKey, keyboardLayout);
       if (hindiChar) {
+        e.preventDefault();
         const textarea = e.currentTarget;
-        const start = textarea.selectionStart;
-        const end = textarea.selectionEnd;
+        const start = textarea.selectionStart ?? typedText.length;
+        const end = textarea.selectionEnd ?? typedText.length;
         const newText = typedText.substring(0, start) + hindiChar + typedText.substring(end);
         setTypedText(newText);
         setTimeout(() => {
-          textarea.selectionStart = textarea.selectionEnd = start + hindiChar.length;
+          if (inputRef.current) {
+            inputRef.current.selectionStart = inputRef.current.selectionEnd = start + hindiChar.length;
+          }
         }, 0);
         playKeyClick();
       }
@@ -478,7 +548,7 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
 
                 {/* Category Pills inside Dropdown */}
                 <div className="px-2.5 py-2 border-b border-[#2c2e35] flex items-center gap-1 overflow-x-auto text-[11px]">
-                  {['All', 'Daily', 'Current Affairs', 'Legal', 'Syllabus'].map((cat) => (
+                  {availableCategories.map((cat) => (
                     <button
                       key={cat}
                       type="button"
@@ -569,7 +639,7 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
 
           {/* Category Chips in Header Bar */}
           <div className="hidden lg:flex items-center gap-1 text-xs">
-            {['Daily', 'Current Affairs', 'Legal', 'Syllabus'].map((cat) => (
+            {availableCategories.filter((c) => c !== 'All').slice(0, 4).map((cat) => (
               <button
                 key={cat}
                 type="button"
@@ -614,13 +684,16 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
 
       {/* 2. SECTIONS SUB-BAR */}
       <div className="bg-[#141519] border-b border-[#2c2e35] px-3 sm:px-4 py-2 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-slate-400 font-semibold">Sections</span>
           <div className="flex rounded-md bg-[#242730] p-0.5 text-xs font-bold">
             <button
               type="button"
               onClick={() => {
                 setLanguage('english');
+                setSelectedCategory('All');
+                const firstEng = PASSAGES_DATA.find((p) => p.language === 'english');
+                if (firstEng) setSelectedPassageId(firstEng.id);
                 handleReset();
               }}
               className={`px-3 py-1 rounded transition-colors ${
@@ -633,6 +706,9 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
               type="button"
               onClick={() => {
                 setLanguage('hindi');
+                setSelectedCategory('All');
+                const firstHin = PASSAGES_DATA.find((p) => p.language === 'hindi');
+                if (firstHin) setSelectedPassageId(firstHin.id);
                 handleReset();
               }}
               className={`px-3 py-1 rounded transition-colors ${
@@ -642,6 +718,50 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
               Hindi Typing Actual
             </button>
           </div>
+
+          {language === 'hindi' && (
+            <div className="flex flex-wrap items-center gap-1.5 pl-1">
+              <div className="flex rounded-md bg-[#242730] p-0.5 text-[11px] font-bold border border-[#374151]">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setKeyboardLayout('remington_gail');
+                    handleReset();
+                  }}
+                  className={`px-2.5 py-0.5 rounded transition-colors ${
+                    keyboardLayout === 'remington_gail'
+                      ? 'bg-amber-500 text-slate-950 font-black'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  Remington GAIL
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setKeyboardLayout('inscript');
+                    handleReset();
+                  }}
+                  className={`px-2.5 py-0.5 rounded transition-colors ${
+                    keyboardLayout === 'inscript'
+                      ? 'bg-amber-500 text-slate-950 font-black'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  InScript
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowKeyboardMap(!showKeyboardMap)}
+                className="px-2.5 py-1 rounded-md bg-[#242730] hover:bg-[#2f3340] border border-[#374151] text-[11px] font-semibold text-amber-300 flex items-center gap-1"
+              >
+                <Keyboard className="w-3 h-3" />
+                <span>Hindi Key Map</span>
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Duration & Timer Display */}

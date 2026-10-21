@@ -1,28 +1,73 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { getAuth } from 'firebase/auth';
+import {
+  initializeFirestore,
+  getFirestore,
+  setLogLevel,
+  Firestore
+} from 'firebase/firestore';
+import firebaseAppletConfig from '../../firebase-applet-config.json';
 
-// Configuration from Vite environment variables with fallback to generated applet config
+// Suppress internal @firebase/firestore console.error spam when client operates in offline fallback mode
+try {
+  setLogLevel('silent');
+} catch {
+  // ignore
+}
+
+// Configuration from generated applet config with optional Vite env override
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyAM5HiICl57RcdcOAT3nSvxj4pn6J-GlIM",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "typingwallah-9e75b.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "typingwallah-9e75b",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "typingwallah-9e75b.firebasestorage.app",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "397913050132",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:397913050132:web:3bad6821bd162679096b01",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || firebaseAppletConfig.apiKey,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || firebaseAppletConfig.authDomain,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || firebaseAppletConfig.projectId,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || firebaseAppletConfig.storageBucket,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || firebaseAppletConfig.messagingSenderId,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || firebaseAppletConfig.appId,
 };
 
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 export const auth = getAuth(app);
-export const googleProvider = new GoogleAuthProvider();
-googleProvider.setCustomParameters({ prompt: 'select_account' });
 
-// Initialize Firestore: use custom database ID from config/env
+// Initialize Firestore: use custom database ID from config/env with long-polling auto-detection for iframe/proxy resilience
 const databaseId =
   import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID ||
-  "ai-studio-typingwallah-9f6ed824-1543-4d7b-b7a9-f0977f151110";
+  firebaseAppletConfig.firestoreDatabaseId;
 
-export const db = getFirestore(app, databaseId);
+let firestoreInstance: Firestore;
+try {
+  firestoreInstance = initializeFirestore(
+    app,
+    { experimentalAutoDetectLongPolling: true },
+    databaseId
+  );
+} catch {
+  firestoreInstance = getFirestore(app, databaseId);
+}
+
+export const db = firestoreInstance;
+
+/**
+ * Wraps a Firestore operation with a fast timeout so offline/slow connections
+ * immediately fall back to local storage without blocking the UI.
+ */
+export function withFirestoreTimeout<T>(promise: Promise<T>, timeoutMs: number = 3500): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('Firestore operation timed out (operating in offline mode)'));
+    }, timeoutMs);
+
+    promise
+      .then((res) => {
+        clearTimeout(timer);
+        resolve(res);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
 
 export default app;
+

@@ -1,5 +1,5 @@
 import { TestResultRecord, UserProfile, UserStatsSummary, LeaderboardItem, UserSubscription, ReferralRecord, Passage, ExamInfo } from '../types';
-import { auth, db } from './firebase';
+import { auth, db, withFirestoreTimeout } from './firebase';
 import {
   collection,
   addDoc,
@@ -132,92 +132,100 @@ export const StorageService = {
     try {
       // A. Write to user's personal results subcollection
       const userSubcol = collection(db, 'users', currentUser.uid, 'results');
-      await addDoc(userSubcol, {
-        userId: currentUser.uid,
-        testId: result.id,
-        timestamp: result.timestamp,
-        createdAt: serverTimestamp(),
-        examId: result.examId,
-        examName: result.examName,
-        language: result.language,
-        keyboardLayout: result.keyboardLayout || 'standard',
-        durationSeconds: result.durationSeconds,
-        passageTitle: result.passageTitle,
-        passageId: result.passageId,
-        metrics: {
-          grossWpm: Number(result.metrics.grossWpm) || 0,
-          netWpm: Number(result.metrics.netWpm) || 0,
-          accuracy: Number(result.metrics.accuracy) || 0,
-          totalChars: Number(result.metrics.totalChars) || 0,
-          correctChars: Number(result.metrics.correctChars) || 0,
-          incorrectChars: Number(result.metrics.incorrectChars) || 0,
-          errors: Number(result.metrics.errors) || 0,
-          backspaceCount: Number(result.metrics.backspaceCount) || 0,
-          keyDepressions: Number(result.metrics.keyDepressions) || 0,
-          kdph: Number(result.metrics.kdph) || 0,
-          isQualified: !!result.metrics.isQualified,
-          grade: result.metrics.grade || 'Unqualified'
-        }
-      });
+      await withFirestoreTimeout(
+        addDoc(userSubcol, {
+          userId: currentUser.uid,
+          testId: result.id,
+          timestamp: result.timestamp,
+          createdAt: serverTimestamp(),
+          examId: result.examId,
+          examName: result.examName,
+          language: result.language,
+          keyboardLayout: result.keyboardLayout || 'standard',
+          durationSeconds: result.durationSeconds,
+          passageTitle: result.passageTitle,
+          passageId: result.passageId,
+          metrics: {
+            grossWpm: Number(result.metrics.grossWpm) || 0,
+            netWpm: Number(result.metrics.netWpm) || 0,
+            accuracy: Number(result.metrics.accuracy) || 0,
+            totalChars: Number(result.metrics.totalChars) || 0,
+            correctChars: Number(result.metrics.correctChars) || 0,
+            incorrectChars: Number(result.metrics.incorrectChars) || 0,
+            errors: Number(result.metrics.errors) || 0,
+            backspaceCount: Number(result.metrics.backspaceCount) || 0,
+            keyDepressions: Number(result.metrics.keyDepressions) || 0,
+            kdph: Number(result.metrics.kdph) || 0,
+            isQualified: !!result.metrics.isQualified,
+            grade: result.metrics.grade || 'Unqualified'
+          }
+        }),
+        3000
+      );
 
       // B. Write to root user_results collection for backwards compatibility & audit
       const rootResultsCol = collection(db, 'user_results');
-      await addDoc(rootResultsCol, {
-        userId: currentUser.uid,
-        userEmail: currentUser.email || '',
-        username: currentUser.displayName || 'Candidate',
-        photoURL: currentUser.photoURL || '',
-        testId: result.id,
-        timestamp: result.timestamp,
-        createdAt: serverTimestamp(),
-        examId: result.examId,
-        examName: result.examName,
-        language: result.language,
-        keyboardLayout: result.keyboardLayout || 'standard',
-        durationSeconds: result.durationSeconds,
-        passageTitle: result.passageTitle,
-        passageId: result.passageId,
-        metrics: {
-          grossWpm: Number(result.metrics.grossWpm) || 0,
-          netWpm: Number(result.metrics.netWpm) || 0,
-          accuracy: Number(result.metrics.accuracy) || 0,
-          totalChars: Number(result.metrics.totalChars) || 0,
-          correctChars: Number(result.metrics.correctChars) || 0,
-          incorrectChars: Number(result.metrics.incorrectChars) || 0,
-          errors: Number(result.metrics.errors) || 0,
-          backspaceCount: Number(result.metrics.backspaceCount) || 0,
-          keyDepressions: Number(result.metrics.keyDepressions) || 0,
-          isQualified: !!result.metrics.isQualified
-        }
-      });
+      await withFirestoreTimeout(
+        addDoc(rootResultsCol, {
+          userId: currentUser.uid,
+          userEmail: currentUser.email || '',
+          username: currentUser.displayName || 'Candidate',
+          photoURL: currentUser.photoURL || '',
+          testId: result.id,
+          timestamp: result.timestamp,
+          createdAt: serverTimestamp(),
+          examId: result.examId,
+          examName: result.examName,
+          language: result.language,
+          keyboardLayout: result.keyboardLayout || 'standard',
+          durationSeconds: result.durationSeconds,
+          passageTitle: result.passageTitle,
+          passageId: result.passageId,
+          metrics: {
+            grossWpm: Number(result.metrics.grossWpm) || 0,
+            netWpm: Number(result.metrics.netWpm) || 0,
+            accuracy: Number(result.metrics.accuracy) || 0,
+            totalChars: Number(result.metrics.totalChars) || 0,
+            correctChars: Number(result.metrics.correctChars) || 0,
+            incorrectChars: Number(result.metrics.incorrectChars) || 0,
+            errors: Number(result.metrics.errors) || 0,
+            backspaceCount: Number(result.metrics.backspaceCount) || 0,
+            keyDepressions: Number(result.metrics.keyDepressions) || 0,
+            isQualified: !!result.metrics.isQualified
+          }
+        }),
+        3000
+      );
 
       // C. Update leaderboard entry if netWpm is competitive
       const leaderboardDocId = `${currentUser.uid}_${result.examId}_${result.language}`;
       const leaderboardDocRef = doc(db, 'leaderboard', leaderboardDocId);
 
-      await setDoc(
-        leaderboardDocRef,
-        {
-          userId: currentUser.uid,
-          username: currentUser.displayName || 'Candidate',
-          photoURL: currentUser.photoURL || '',
-          netWpm: Number(result.metrics.netWpm) || 0,
-          grossWpm: Number(result.metrics.grossWpm) || 0,
-          accuracy: Number(result.metrics.accuracy) || 0,
-          exam: result.examName,
-          examId: result.examId,
-          language: result.language,
-          date: new Date().toLocaleDateString('en-IN', {
-            day: 'numeric',
-            month: 'short',
-            year: 'numeric'
-          }),
-          timestamp: serverTimestamp()
-        },
-        { merge: true }
+      await withFirestoreTimeout(
+        setDoc(
+          leaderboardDocRef,
+          {
+            userId: currentUser.uid,
+            username: currentUser.displayName || 'Candidate',
+            photoURL: currentUser.photoURL || '',
+            netWpm: Number(result.metrics.netWpm) || 0,
+            grossWpm: Number(result.metrics.grossWpm) || 0,
+            accuracy: Number(result.metrics.accuracy) || 0,
+            exam: result.examName,
+            examId: result.examId,
+            language: result.language,
+            date: new Date().toLocaleDateString('en-IN', {
+              day: 'numeric',
+              month: 'short',
+              year: 'numeric'
+            }),
+            timestamp: serverTimestamp()
+          },
+          { merge: true }
+        ),
+        3000
       );
     } catch (error) {
-      console.error('Error syncing test result to Firestore:', error);
       throw error;
     }
   },
@@ -226,7 +234,7 @@ export const StorageService = {
     try {
       const userSubcol = collection(db, 'users', uid, 'results');
       const q = query(userSubcol, orderBy('timestamp', 'desc'), limit(30));
-      const snap = await getDocs(q);
+      const snap = await withFirestoreTimeout(getDocs(q), 2500);
 
       const records: TestResultRecord[] = [];
       snap.forEach((docSnap) => {
@@ -264,8 +272,8 @@ export const StorageService = {
         localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(records));
         return records;
       }
-    } catch (e) {
-      console.warn('Could not fetch cloud user history, using local cache:', e);
+    } catch {
+      // Fall back to local cache seamlessly
     }
 
     return this.getTestHistory();
@@ -280,7 +288,7 @@ export const StorageService = {
         q = query(leaderCol, where('examId', '==', examId), orderBy('netWpm', 'desc'), limit(50));
       }
 
-      const snap = await getDocs(q);
+      const snap = await withFirestoreTimeout(getDocs(q), 2500);
       const items: LeaderboardItem[] = [];
       let rank = 1;
 
@@ -307,8 +315,7 @@ export const StorageService = {
       });
 
       return items;
-    } catch (e) {
-      console.warn('Leaderboard fetch note (falling back to cached data):', e);
+    } catch {
       return [];
     }
   },
@@ -399,7 +406,7 @@ export const StorageService = {
   async syncSubscriptionWithCloud(uid: string): Promise<UserSubscription | null> {
     try {
       const subDocRef = doc(db, 'subscriptions', uid);
-      const snap = await getDoc(subDocRef);
+      const snap = await withFirestoreTimeout(getDoc(subDocRef), 2500);
       if (snap.exists()) {
         const d = snap.data();
         const sub: UserSubscription = {
@@ -414,8 +421,8 @@ export const StorageService = {
         this.saveSubscription(sub);
         return sub;
       }
-    } catch (e) {
-      console.warn('Could not sync cloud subscription:', e);
+    } catch {
+      // Fall back to local subscription state seamlessly
     }
     return this.getSubscription();
   },
@@ -469,12 +476,15 @@ export const StorageService = {
       };
 
       try {
-        await addDoc(collection(db, 'referrals'), {
-          ...referralRecord,
-          createdAt: serverTimestamp()
-        });
-      } catch (firestoreErr) {
-        console.warn('Firestore referral record notice (proceeding locally):', firestoreErr);
+        await withFirestoreTimeout(
+          addDoc(collection(db, 'referrals'), {
+            ...referralRecord,
+            createdAt: serverTimestamp()
+          }),
+          2500
+        );
+      } catch {
+        // Proceed locally
       }
 
       // Activate PRO trial on current user profile
@@ -504,7 +514,6 @@ export const StorageService = {
         daysAdded: daysToAward
       };
     } catch (e: any) {
-      console.error('Referral application failed:', e);
       return { success: false, message: e?.message || 'Referral could not be applied' };
     }
   },
@@ -512,13 +521,16 @@ export const StorageService = {
   async awardReferralToOwner(referrerUid: string, daysEarned: number = 7): Promise<void> {
     try {
       const userRef = doc(db, 'users', referrerUid);
-      await updateDoc(userRef, {
-        referralCount: increment(1),
-        referralDaysEarned: increment(daysEarned),
-        isPro: true
-      });
-    } catch (e) {
-      console.warn('Could not increment owner referral in cloud:', e);
+      await withFirestoreTimeout(
+        updateDoc(userRef, {
+          referralCount: increment(1),
+          referralDaysEarned: increment(daysEarned),
+          isPro: true
+        }),
+        2500
+      );
+    } catch {
+      // Proceed locally
     }
   },
 

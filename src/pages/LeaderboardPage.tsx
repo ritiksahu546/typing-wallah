@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ActivePage, ExamId, LeaderboardItem, UserProfile } from '../types';
 import { DEMO_LEADERBOARD_DATA } from '../data/leaderboard';
 import { StorageService } from '../services/storageService';
-import { db } from '../services/firebase';
+import { db, withFirestoreTimeout } from '../services/firebase';
 import { collection, query, orderBy, limit, getDocs } from 'firebase/firestore';
 import {
   Trophy,
@@ -37,7 +37,7 @@ export const LeaderboardPage: React.FC<LeaderboardPageProps> = ({
       try {
         setIsLoadingFirestore(true);
         const q = query(collection(db, 'leaderboard'), orderBy('netWpm', 'desc'), limit(50));
-        const querySnapshot = await getDocs(q);
+        const querySnapshot = await withFirestoreTimeout(getDocs(q), 2500);
         if (!isMounted) return;
 
         const onlineItems: LeaderboardItem[] = [];
@@ -60,8 +60,8 @@ export const LeaderboardPage: React.FC<LeaderboardPageProps> = ({
         });
 
         setFirestoreLeaderboard(onlineItems);
-      } catch (err) {
-        console.warn('Firestore leaderboard query notice:', err);
+      } catch {
+        // Fallback to local & benchmark leaderboard entries
       } finally {
         if (isMounted) setIsLoadingFirestore(false);
       }
@@ -130,7 +130,7 @@ export const LeaderboardPage: React.FC<LeaderboardPageProps> = ({
         <div className="bg-white/10 border border-white/20 rounded-2xl p-3.5 text-xs text-white/90 flex items-start space-x-2.5 max-w-2xl">
           <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
           <p>
-            <strong>Live Sync Notice:</strong> All scores typed while signed in with Google are synced to the cloud Firestore collection in real time.
+            <strong>Live Sync Notice:</strong> All scores typed while signed in to your account are synced to the cloud Firestore collection in real time.
           </p>
         </div>
       </div>

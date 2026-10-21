@@ -7,6 +7,7 @@ import {
   FINGER_DETAILS,
   FingerKey
 } from '../data/touchTypingData';
+import { translatePhysicalKeyToHindi, transliterateNewInputToHindi } from '../engine/hindiKeyboards';
 import { InteractiveHandGuide } from '../components/InteractiveHandGuide';
 import { TouchTypingKeyboard } from '../components/TouchTypingKeyboard';
 import {
@@ -151,7 +152,7 @@ export const LearnTouchTypingPage: React.FC<LearnTouchTypingPageProps> = ({
       setIsCompleted(false);
       setStartTime(null);
       setTimeout(() => {
-        inputRef.current?.focus();
+        inputRef.current?.focus({ preventScroll: true });
       }, 100);
     }
   }, [currentLessonIndex, selectedLanguage, hindiLayout, activeMode]);
@@ -176,12 +177,52 @@ export const LearnTouchTypingPage: React.FC<LearnTouchTypingPageProps> = ({
     }
   };
 
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (isCompleted) return;
+
+    if (
+      selectedLanguage === 'hindi' &&
+      e.key.length === 1 &&
+      e.key !== ' ' &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      !e.metaKey
+    ) {
+      const hindiChar = translatePhysicalKeyToHindi(e.key, e.shiftKey, hindiLayout);
+      if (hindiChar) {
+        e.preventDefault();
+        if (!startTime) {
+          setStartTime(Date.now());
+        }
+        const nextVal = typedInput + hindiChar;
+        if (nextVal.length <= targetText.length) {
+          const charIndex = typedInput.length;
+          if (charIndex < targetText.length) {
+            if (nextVal.slice(charIndex) !== targetText.slice(charIndex, nextVal.length)) {
+              setMistakeCount((prev) => prev + 1);
+            } else {
+              playClick();
+            }
+          }
+          setTypedInput(nextVal);
+          if (nextVal.length === targetText.length) {
+            setIsCompleted(true);
+          }
+        }
+      }
+    }
+  };
+
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (isCompleted) return;
 
-    const val = e.target.value;
+    let val = e.target.value;
     if (!startTime && val.length > 0) {
       setStartTime(Date.now());
+    }
+
+    if (selectedLanguage === 'hindi' && val.length > typedInput.length) {
+      val = transliterateNewInputToHindi(typedInput, val, hindiLayout);
     }
 
     if (val.length > typedInput.length) {
@@ -208,7 +249,7 @@ export const LearnTouchTypingPage: React.FC<LearnTouchTypingPageProps> = ({
     setMistakeCount(0);
     setIsCompleted(false);
     setStartTime(null);
-    inputRef.current?.focus();
+    inputRef.current?.focus({ preventScroll: true });
   };
 
   const handleNextLesson = () => {
@@ -229,113 +270,87 @@ export const LearnTouchTypingPage: React.FC<LearnTouchTypingPageProps> = ({
       : 100;
 
   return (
-    <div id="learn-touch-typing-page" className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-      {/* Top Main Hero Banner */}
-      <div className="bg-gradient-to-r from-blue-700 via-indigo-800 to-slate-900 text-white rounded-3xl p-6 sm:p-10 shadow-xl space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-blue-400/20 text-blue-200 border border-blue-300/30 text-xs font-bold uppercase tracking-wider">
-            <Trophy className="w-3.5 h-3.5 text-amber-300" />
-            <span>Touch Typing Learning Academy • 11 Levels • 92 Lessons</span>
-          </div>
-
-          {/* Quick Metrics Badges */}
-          <div className="flex items-center space-x-3 text-xs font-bold">
-            <div className="flex items-center space-x-1 px-3 py-1 rounded-xl bg-white/10 backdrop-blur-sm border border-white/10 text-amber-300">
-              <Flame className="w-3.5 h-3.5 text-orange-400 fill-orange-400" />
-              <span>{progress.currentStreak} Day Streak</span>
-            </div>
-
-            <div className="flex items-center space-x-1 px-3 py-1 rounded-xl bg-white/10 backdrop-blur-sm border border-white/10 text-emerald-300">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>{progress.completedLessonIds.length} / {lessons.length} Passed</span>
-            </div>
-          </div>
-        </div>
-
-        <h1 className="text-3xl sm:text-4xl lg:text-5xl font-black tracking-tight">
-          Touch Typing Mastery Course: 50 WPM Roadmap
-        </h1>
-
-        <p className="text-sm sm:text-base text-blue-100 max-w-3xl leading-relaxed">
-          Follow our progressive curriculum from home-row fundamentals to speed mastery.
-          Each lesson unlocks sequentially as you meet benchmark accuracy and speed standards.
-          Synced to your account across Website, Android, and Windows.
-        </p>
-
-        {/* Primary Learning Mode Switcher */}
-        <div className="pt-2 flex flex-wrap items-center justify-between gap-3 border-t border-white/10">
-          <div className="flex rounded-2xl bg-white/10 backdrop-blur-sm p-1 border border-white/20 text-xs font-black">
+    <div id="learn-touch-typing-page" className="max-w-6xl mx-auto px-3 sm:px-6 py-2.5 space-y-2.5">
+      {/* Compact Single-Row Top Bar so the entire Touch Typing Stage fits in 1 screen */}
+      <div className="bg-slate-900 text-white rounded-xl px-3.5 py-2 border border-slate-800 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-3">
+          <div className="flex rounded-lg bg-slate-800 p-0.5 border border-slate-700 text-xs font-bold">
             <button
               type="button"
               onClick={() => setActiveMode('course')}
-              className={`px-5 py-2.5 rounded-xl transition-all flex items-center space-x-2 ${
+              className={`px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                 activeMode === 'course'
-                  ? 'bg-white text-blue-900 shadow-md font-black'
-                  : 'text-blue-100 hover:text-white'
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'text-slate-300 hover:text-white'
               }`}
             >
-              <Trophy className="w-4 h-4 text-amber-500" />
-              <span>Progressive 92-Lesson Course</span>
+              <Trophy className="w-3.5 h-3.5 text-amber-300" />
+              <span>92-Lesson Course</span>
             </button>
 
             <button
               type="button"
               onClick={() => setActiveMode('free-practice')}
-              className={`px-5 py-2.5 rounded-xl transition-all flex items-center space-x-2 ${
+              className={`px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                 activeMode === 'free-practice'
-                  ? 'bg-white text-blue-900 shadow-md font-black'
-                  : 'text-blue-100 hover:text-white'
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'text-slate-300 hover:text-white'
               }`}
             >
-              <Keyboard className="w-4 h-4 text-blue-600" />
+              <Keyboard className="w-3.5 h-3.5" />
               <span>Free Layout & Hindi Guide</span>
             </button>
           </div>
 
-          <div className="flex items-center space-x-2">
-            {activeMode === 'course' && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setIsCurriculumDrawerOpen(true)}
-                  className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white font-bold text-xs flex items-center space-x-1.5 border border-white/20 transition-colors"
-                >
-                  <Layers className="w-4 h-4" />
-                  <span>Curriculum Index</span>
-                </button>
+          <div className="hidden md:flex items-center gap-2 text-xs text-slate-300 font-medium">
+            <span>{progress.completedLessonIds.length} / {lessons.length} Passed</span>
+            <span aria-hidden="true">·</span>
+            <span className="text-amber-300">{progress.currentStreak} Day Streak</span>
+          </div>
+        </div>
 
-                <button
-                  type="button"
-                  onClick={() => setIsDashboardModalOpen(true)}
-                  className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black text-xs flex items-center space-x-1.5 shadow-md transition-all"
-                >
-                  <Target className="w-4 h-4 fill-current" />
-                  <span>Student Dashboard</span>
-                </button>
-
-                {/* Admin CMS Trigger */}
-                <button
-                  type="button"
-                  onClick={() => setIsAdminManagerOpen(true)}
-                  className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-blue-200 hover:text-white border border-white/20 transition-colors"
-                  title="Admin Lesson CMS"
-                >
-                  <Settings className="w-4 h-4" />
-                </button>
-              </>
-            )}
-
-            {activeMode === 'free-practice' && (
+        <div className="flex items-center gap-2">
+          {activeMode === 'course' && (
+            <>
               <button
                 type="button"
-                onClick={() => onNavigate('typing-test')}
-                className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold text-xs flex items-center space-x-1.5 shadow-md"
+                onClick={() => setIsCurriculumDrawerOpen(true)}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs flex items-center gap-1.5 border border-slate-700 transition-colors cursor-pointer whitespace-nowrap"
               >
-                <Zap className="w-4 h-4 fill-current" />
-                <span>Go to Full Exam Practice →</span>
+                <Layers className="w-3.5 h-3.5 text-blue-400" />
+                <span>All Lessons ({lessons.length})</span>
               </button>
-            )}
-          </div>
+
+              <button
+                type="button"
+                onClick={() => setIsDashboardModalOpen(true)}
+                className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black text-xs flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <Target className="w-3.5 h-3.5" />
+                <span>Dashboard</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsAdminManagerOpen(true)}
+                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors cursor-pointer"
+                title="Admin Lesson CMS"
+              >
+                <Settings className="w-3.5 h-3.5" />
+              </button>
+            </>
+          )}
+
+          {activeMode === 'free-practice' && (
+            <button
+              type="button"
+              onClick={() => onNavigate('typing-test')}
+              className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+            >
+              <Zap className="w-3.5 h-3.5" />
+              <span>Full Exam Practice</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -576,6 +591,7 @@ export const LearnTouchTypingPage: React.FC<LearnTouchTypingPageProps> = ({
                       type="text"
                       id="touch-typing-live-input"
                       value={typedInput}
+                      onKeyDown={handleKeyDown}
                       onChange={handleInputChange}
                       disabled={isCompleted}
                       placeholder="यहाँ टाइप करना शुरू करें (उंगलियों की सही पोजीशन रखें)..."
@@ -584,7 +600,9 @@ export const LearnTouchTypingPage: React.FC<LearnTouchTypingPageProps> = ({
                       autoCapitalize="none"
                       autoCorrect="off"
                       autoComplete="off"
-                      className="w-full px-4 py-3 rounded-xl border-2 border-slate-300 dark:border-slate-700 focus:border-blue-500 dark:focus:border-blue-400 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-mono text-base outline-none transition-all shadow-xs"
+                      className={`w-full px-4 py-3 rounded-xl border-2 border-slate-300 dark:border-slate-700 focus:border-blue-500 dark:focus:border-blue-400 bg-white dark:bg-slate-900 text-slate-900 dark:text-white text-base outline-none transition-all shadow-xs ${
+                        selectedLanguage === 'hindi' ? 'font-hindi' : 'font-mono'
+                      }`}
                     />
 
                     <div className="absolute right-2 top-2 flex items-center space-x-1">

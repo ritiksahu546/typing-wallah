@@ -158,57 +158,120 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
     setActiveTab(lesson.mode === 'test' ? 'test' : 'intro');
   }, [lesson.id]);
 
-  // Keep hidden input focused in intro/practice mode
-  const focusInput = () => {
+  // Keep input focused without scrolling the page
+  const focusInput = useCallback(() => {
     if (activeTab === 'test') {
-      testTextareaRef.current?.focus();
+      testTextareaRef.current?.focus({ preventScroll: true });
     } else {
-      hiddenInputRef.current?.focus();
+      hiddenInputRef.current?.focus({ preventScroll: true });
     }
-  };
+  }, [activeTab]);
 
   useEffect(() => {
     focusInput();
-  }, [activeTab, introIdx, practiceIdx]);
+  }, [activeTab, lesson.id, focusInput]);
 
-  // Handle typing in Introduction & Practice mode
-  const handleStageKeyDown = (e: React.KeyboardEvent) => {
-    if (!isLessonUnlocked) return;
-    if (e.key === 'Tab' || e.key === 'Alt' || e.key === 'Control' || e.key === 'Shift') return;
+  // Process a single typed character in Introduction & Practice modes
+  const processStageChar = useCallback(
+    (typedChar: string) => {
+      if (!isLessonUnlocked || showResultModal) return;
 
-    const currentSequence = activeTab === 'intro' ? introSequence : practiceSequence;
-    const currentIdx = activeTab === 'intro' ? introIdx : practiceIdx;
-    const setIdx = activeTab === 'intro' ? setIntroIdx : setPracticeIdx;
+      const currentSequence = activeTab === 'intro' ? introSequence : practiceSequence;
+      const currentIdx = activeTab === 'intro' ? introIdx : practiceIdx;
+      const setIdx = activeTab === 'intro' ? setIntroIdx : setPracticeIdx;
 
-    const targetChar = currentSequence[currentIdx];
-    if (!targetChar) return;
+      const targetChar = currentSequence[currentIdx];
+      if (!targetChar) return;
 
-    if (e.key === targetChar) {
-      playTone('key', soundEnabled);
-      const nextIdx = currentIdx + 1;
-      setIdx(nextIdx);
+      // Match exact char, or case-insensitive if targetChar is lowercase
+      const isMatch =
+        typedChar === targetChar ||
+        (targetChar === targetChar.toLowerCase() && typedChar.toLowerCase() === targetChar);
 
-      if (nextIdx >= currentSequence.length) {
-        playTone('success', soundEnabled);
-        if (activeTab === 'intro') {
-          // Auto switch to practice or test
-          setTimeout(() => {
-            setActiveTab('practice');
-            setPracticeIdx(0);
-          }, 300);
-        } else if (activeTab === 'practice') {
-          // Prompt to take test
-          setTimeout(() => {
-            setActiveTab('test');
-          }, 300);
+      if (isMatch) {
+        playTone('key', soundEnabled);
+        const nextIdx = currentIdx + 1;
+        setIdx(nextIdx);
+
+        if (nextIdx >= currentSequence.length) {
+          playTone('success', soundEnabled);
+          if (activeTab === 'intro') {
+            setTimeout(() => {
+              setActiveTab('practice');
+              setPracticeIdx(0);
+            }, 250);
+          } else if (activeTab === 'practice') {
+            setTimeout(() => {
+              setActiveTab('test');
+            }, 250);
+          }
         }
+      } else {
+        playTone('error', soundEnabled);
+        setMistakeShake(true);
+        setTimeout(() => setMistakeShake(false), 300);
       }
-    } else {
-      // Mistake
-      playTone('error', soundEnabled);
-      setMistakeShake(true);
-      setTimeout(() => setMistakeShake(false), 300);
+    },
+    [
+      isLessonUnlocked,
+      showResultModal,
+      activeTab,
+      introSequence,
+      practiceSequence,
+      introIdx,
+      practiceIdx,
+      soundEnabled
+    ]
+  );
+
+  // Global window keydown listener for Intro & Practice modes so typing never scrolls the page
+  useEffect(() => {
+    if (activeTab === 'test' || !isLessonUnlocked || showResultModal) return;
+
+    const handleWindowKeyDown = (e: KeyboardEvent) => {
+      // Ignore if user is typing in another input/textarea (other than our hidden stage input)
+      const activeEl = document.activeElement;
+      if (
+        activeEl &&
+        (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'SELECT') &&
+        activeEl !== hiddenInputRef.current
+      ) {
+        return;
+      }
+
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      if (
+        e.key === 'Tab' ||
+        e.key === 'Shift' ||
+        e.key === 'Control' ||
+        e.key === 'Alt' ||
+        e.key === 'CapsLock' ||
+        e.key === 'Escape'
+      ) {
+        return;
+      }
+
+      if (e.key.length === 1) {
+        e.preventDefault();
+        e.stopPropagation();
+        processStageChar(e.key);
+      }
+    };
+
+    window.addEventListener('keydown', handleWindowKeyDown, { capture: true });
+    return () => {
+      window.removeEventListener('keydown', handleWindowKeyDown, { capture: true });
+    };
+  }, [activeTab, isLessonUnlocked, showResultModal, processStageChar]);
+
+  // Fallback onChange for mobile virtual keyboards
+  const handleHiddenInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    if (val.length > 0) {
+      const lastChar = val[val.length - 1];
+      processStageChar(lastChar);
     }
+    e.target.value = '';
   };
 
   // Handle Test Mode typing & real-time analytics
@@ -231,7 +294,7 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
 
     // Calculate real-time speed & accuracy
     const now = Date.now();
-    const elapsedSeconds = testStartTime ? Math.max(1, (now - testStartTime) / 1000) : 1;
+    const elapsedSeconds = testStartTime ? Math.max(1.5, (now - testStartTime) / 1000) : 1.5;
 
     let errors = 0;
     for (let i = 0; i < val.length; i++) {
@@ -243,8 +306,8 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
 
     const typedWords = val.length / 5;
     const grossWpm = Math.round((typedWords / (elapsedSeconds / 60)) || 0);
-    const uncorrectedErrors = errors;
-    const netWpm = Math.max(0, Math.round(((typedWords - uncorrectedErrors) / (elapsedSeconds / 60)) || 0));
+    const errorWords = errors / 5;
+    const netWpm = Math.max(0, Math.round(((typedWords - errorWords) / (elapsedSeconds / 60)) || 0));
     const accuracy = val.length > 0 ? Math.max(0, Math.round(((val.length - errors) / val.length) * 100)) : 100;
 
     setTestWpm(netWpm);
@@ -252,7 +315,7 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
 
     // Check completion
     if (val.length >= testText.length) {
-      finishTest(val, errors, elapsedSeconds, grossWpm, netWpm, accuracy);
+      finishTest(val, errors, Math.round(elapsedSeconds), grossWpm, netWpm, accuracy);
     }
   };
 
@@ -306,7 +369,7 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
     setTestWpm(0);
     setTestAccuracy(100);
     setShowResultModal(false);
-    setTimeout(() => testTextareaRef.current?.focus(), 100);
+    setTimeout(() => testTextareaRef.current?.focus({ preventScroll: true }), 100);
   };
 
   // Continue to next lesson after passing
@@ -356,207 +419,169 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
     nextLessonExists && lesson.lessonNumber + 1 <= progress.highestUnlockedLessonNumber;
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6" onClick={focusInput}>
-      {/* Hidden input for capturing keyboard events smoothly */}
+    <div className="max-w-6xl mx-auto space-y-2.5 relative" onClick={focusInput}>
+      {/* Hidden input positioned in-place (never at -top-9999) so focusing never scrolls the window */}
       <input
         ref={hiddenInputRef}
         type="text"
-        className="opacity-0 absolute -top-9999 pointer-events-none"
-        onKeyDown={handleStageKeyDown}
-        autoFocus
+        value=""
+        onChange={handleHiddenInputChange}
+        aria-label="Touch typing stage input"
+        className="fixed top-1/2 left-1/2 w-1 h-1 opacity-0 pointer-events-none"
       />
 
-      {/* Top Header Card */}
-      <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 sm:p-6 border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          {/* Lesson Title & Level */}
-          <div className="flex items-center space-x-3">
-            <button
-              type="button"
-              onClick={goToPrevLesson}
-              disabled={lesson.lessonNumber <= 1}
-              className="p-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 disabled:pointer-events-none transition-colors"
-              title="Previous Lesson"
-            >
-              <ArrowLeft className="w-4 h-4" />
-            </button>
+      {/* Compact Single-Row Lesson Header + Mode Tabs */}
+      <div className="bg-white dark:bg-slate-900 rounded-xl px-4 py-2.5 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-wrap items-center justify-between gap-3">
+        {/* Left: Lesson Navigation & Title */}
+        <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={goToPrevLesson}
+            disabled={lesson.lessonNumber <= 1}
+            className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 disabled:pointer-events-none transition-colors cursor-pointer"
+            title="Previous Lesson"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
 
-            <div>
-              <div className="flex items-center space-x-2">
-                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider bg-blue-100 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300">
-                  Lesson {lesson.lessonNumber}
-                </span>
-
-                {isCompleted && (
-                  <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300">
-                    <CheckCircle2 className="w-3 h-3" />
-                    <span>Passed ✓</span>
-                  </span>
-                )}
-
-                {lesson.tier === 'pro' && (
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-500/20 text-amber-500 uppercase">
-                    PRO
-                  </span>
-                )}
-              </div>
-
-              <h1 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white mt-1">
-                {lesson.name}
-              </h1>
-            </div>
-
-            <button
-              type="button"
-              onClick={goToNextLesson}
-              disabled={!canGoNext}
-              className="p-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 disabled:pointer-events-none transition-colors"
-              title={canGoNext ? 'Next Lesson' : 'Next lesson is locked'}
-            >
-              <ArrowRight className="w-4 h-4" />
-            </button>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-blue-600 dark:text-blue-400 whitespace-nowrap">
+              Lesson {lesson.lessonNumber}:
+            </span>
+            <h2 className="text-base sm:text-lg font-black text-slate-900 dark:text-white whitespace-nowrap">
+              {lesson.name}
+            </h2>
+            {isCompleted && (
+              <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Passed</span>
+              </span>
+            )}
           </div>
 
-          {/* Quick Actions & Sound */}
-          <div className="flex items-center space-x-2">
-            <button
-              type="button"
-              onClick={() => setSoundEnabled(!soundEnabled)}
-              className="p-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-              title={soundEnabled ? 'Mute typing sounds' : 'Enable typing sounds'}
-            >
-              {soundEnabled ? <Volume2 className="w-4 h-4 text-blue-500" /> : <VolumeX className="w-4 h-4" />}
-            </button>
-
-            <button
-              type="button"
-              onClick={onOpenCurriculum}
-              className="px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 font-bold text-xs flex items-center space-x-1.5 transition-colors"
-            >
-              <Layers className="w-3.5 h-3.5 text-blue-500" />
-              <span>All Lessons ({allLessons.length})</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={onOpenDashboard}
-              className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center space-x-1.5 shadow-md shadow-blue-500/20 transition-all"
-            >
-              <Trophy className="w-3.5 h-3.5 text-amber-300" />
-              <span>Dashboard</span>
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={goToNextLesson}
+            disabled={!canGoNext}
+            className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 disabled:pointer-events-none transition-colors cursor-pointer"
+            title={canGoNext ? 'Next Lesson' : 'Next lesson is locked'}
+          >
+            <ArrowRight className="w-4 h-4" />
+          </button>
         </div>
 
-        {/* Lesson Mode Navigation Tabs & Criteria Pill */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
-          <div className="flex items-center space-x-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-2xl">
+        {/* Center: Lesson Mode Navigation Tabs */}
+        <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl">
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab('intro');
+              setIntroIdx(0);
+            }}
+            className={`px-3 py-1.5 rounded-lg font-bold text-xs transition-colors cursor-pointer whitespace-nowrap ${
+              activeTab === 'intro'
+                ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-white shadow-xs'
+                : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+            }`}
+          >
+            1. Key Intro
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab('practice');
+              setPracticeIdx(0);
+            }}
+            className={`px-3 py-1.5 rounded-lg font-bold text-xs transition-colors cursor-pointer whitespace-nowrap ${
+              activeTab === 'practice'
+                ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-white shadow-xs'
+                : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+            }`}
+          >
+            2. Practice Drills
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('test')}
+            className={`px-3 py-1.5 rounded-lg font-bold text-xs transition-colors flex items-center gap-1 cursor-pointer whitespace-nowrap ${
+              activeTab === 'test'
+                ? 'bg-blue-600 text-white shadow-xs'
+                : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+            }`}
+          >
+            <Target className="w-3.5 h-3.5" />
+            <span>3. Benchmark Test</span>
+          </button>
+        </div>
+
+        {/* Right: Pass Benchmark & Sound Toggle */}
+        <div className="flex items-center gap-2 text-xs">
+          <span className="hidden sm:inline text-slate-500 dark:text-slate-400">
+            Goal: <strong className="font-mono text-slate-800 dark:text-slate-200">{lesson.targetWpm} WPM · {lesson.minAccuracy}%</strong>
+          </span>
+
+          {activeTab === 'intro' && (
             <button
               type="button"
-              onClick={() => {
-                setActiveTab('intro');
-                setIntroIdx(0);
-              }}
-              className={`px-4 py-2 rounded-xl font-black text-xs transition-all ${
-                activeTab === 'intro'
-                  ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-white shadow-xs'
-                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800'
-              }`}
+              onClick={() => setActiveTab('practice')}
+              className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs transition-colors cursor-pointer whitespace-nowrap"
             >
-              1. Key Introduction
+              Skip to Drills →
             </button>
+          )}
 
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab('practice');
-                setPracticeIdx(0);
-              }}
-              className={`px-4 py-2 rounded-xl font-black text-xs transition-all ${
-                activeTab === 'practice'
-                  ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-white shadow-xs'
-                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800'
-              }`}
-            >
-              2. Practice Drills
-            </button>
+          {activeTab === 'practice' && (
+            <>
+              <button
+                type="button"
+                onClick={() => setPracticeIdx(0)}
+                className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                title="Reset Practice"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('test')}
+                className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs transition-colors cursor-pointer whitespace-nowrap"
+              >
+                Take Test →
+              </button>
+            </>
+          )}
 
-            <button
-              type="button"
-              onClick={() => setActiveTab('test')}
-              className={`px-4 py-2 rounded-xl font-black text-xs transition-all flex items-center space-x-1 ${
-                activeTab === 'test'
-                  ? 'bg-blue-600 text-white shadow-md'
-                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800'
-              }`}
-            >
-              <Target className="w-3.5 h-3.5" />
-              <span>3. Benchmark Test (Unlock Next)</span>
-            </button>
-          </div>
-
-          <div className="flex items-center space-x-2 text-xs">
-            <span className="text-slate-500 dark:text-slate-400">Pass Benchmark:</span>
-            <span className="font-mono font-bold text-slate-900 dark:text-white bg-slate-100 dark:bg-slate-800 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700">
-              {lesson.targetWpm} WPM • {lesson.minAccuracy}% Accuracy
-            </span>
-          </div>
+          <button
+            type="button"
+            onClick={() => setSoundEnabled(!soundEnabled)}
+            className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            title={soundEnabled ? 'Mute typing sounds' : 'Enable typing sounds'}
+          >
+            {soundEnabled ? <Volume2 className="w-4 h-4 text-blue-500" /> : <VolumeX className="w-4 h-4" />}
+          </button>
         </div>
       </div>
 
       {/* Main Interactive Stage */}
       {activeTab === 'intro' && (
-        <div className="space-y-4 animate-in fade-in duration-200">
-          <TouchTypingVisualStage
-            currentKey={introSequence[introIdx] || ' '}
-            sequence={introSequence}
-            currentIndex={introIdx}
-            mode="introduction"
-            mistakeTrigger={mistakeShake}
-          />
-
-          <div className="text-center">
-            <button
-              type="button"
-              onClick={() => setActiveTab('practice')}
-              className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-md shadow-blue-500/20 inline-flex items-center space-x-1.5 transition-all"
-            >
-              <span>Continue to Practice Drills →</span>
-            </button>
-          </div>
-        </div>
+        <TouchTypingVisualStage
+          currentKey={introSequence[introIdx] || ' '}
+          sequence={introSequence}
+          currentIndex={introIdx}
+          mode="introduction"
+          mistakeTrigger={mistakeShake}
+        />
       )}
 
       {activeTab === 'practice' && (
-        <div className="space-y-4 animate-in fade-in duration-200">
-          <TouchTypingVisualStage
-            currentKey={practiceSequence[practiceIdx] || ' '}
-            sequence={practiceSequence}
-            currentIndex={practiceIdx}
-            mode="practice"
-            mistakeTrigger={mistakeShake}
-          />
-
-          <div className="flex justify-center items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setPracticeIdx(0)}
-              className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 font-bold text-xs inline-flex items-center space-x-1.5 transition-colors"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>Reset Practice</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab('test')}
-              className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-black text-xs shadow-md shadow-blue-500/20 inline-flex items-center space-x-1.5 transition-all"
-            >
-              <Target className="w-3.5 h-3.5" />
-              <span>Take Benchmark Test & Unlock Next Lesson →</span>
-            </button>
-          </div>
-        </div>
+        <TouchTypingVisualStage
+          currentKey={practiceSequence[practiceIdx] || ' '}
+          sequence={practiceSequence}
+          currentIndex={practiceIdx}
+          mode="practice"
+          mistakeTrigger={mistakeShake}
+        />
       )}
 
       {activeTab === 'test' && (

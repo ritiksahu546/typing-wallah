@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ExamId, Language, HindiKeyboardLayout, Passage, TestResultRecord, TypingMetrics } from '../types';
 import { calculateTypingMetrics, ExamScoreResult } from '../engine/metrics';
-import { translatePhysicalKeyToHindi } from '../engine/hindiKeyboards';
+import { translatePhysicalKeyToHindi, transliterateNewInputToHindi } from '../engine/hindiKeyboards';
 import { QWERTY_FINGER_MAP } from '../data/touchTypingData';
 import {
   RotateCcw,
@@ -59,7 +59,7 @@ export const TypingEngine: React.FC<TypingEngineProps> = ({
   const [fontSize, setFontSize] = useState<'normal' | 'large' | 'xlarge'>('large');
   const [showKeyboardMap, setShowKeyboardMap] = useState(false);
   const [backspaceBlockedWarning, setBackspaceBlockedWarning] = useState(false);
-  const [useVirtualRemington, setUseVirtualRemington] = useState(false);
+  const [useVirtualRemington, setUseVirtualRemington] = useState(true);
   const [showEarlySubmitModal, setShowEarlySubmitModal] = useState(false);
   const [statsCollapsed, setStatsCollapsed] = useState<boolean>(() => {
     try {
@@ -82,12 +82,13 @@ export const TypingEngine: React.FC<TypingEngineProps> = ({
   // References
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const timerRef = useRef<number | null>(null);
+  const lastTickRef = useRef<number | null>(null);
   const activeCharRef = useRef<HTMLSpanElement | null>(null);
   const passageContainerRef = useRef<HTMLDivElement | null>(null);
   const wakeLockRef = useRef<any>(null);
 
   const targetText = passage.content;
-  const remainingSeconds = Math.max(0, durationSeconds - elapsedSeconds);
+  const remainingSeconds = Math.max(0, durationSeconds - Math.floor(elapsedSeconds));
 
   // Screen Wake Lock API to keep screen alive during 10/15 min typing tests
   useEffect(() => {
@@ -119,7 +120,7 @@ export const TypingEngine: React.FC<TypingEngineProps> = ({
   const currentMetrics: ExamScoreResult = calculateTypingMetrics(
     typedText,
     targetText,
-    elapsedSeconds,
+    typedText.length > 0 ? Math.max(1.5, elapsedSeconds) : 0,
     durationSeconds,
     backspaceCount,
     examId,
@@ -164,10 +165,11 @@ export const TypingEngine: React.FC<TypingEngineProps> = ({
     setIsActive(false);
     setIsFinished(true);
 
+    const finalElapsed = Math.max(1.5, elapsedSeconds);
     const finalMetrics = calculateTypingMetrics(
       typedText,
       targetText,
-      Math.max(1, elapsedSeconds),
+      finalElapsed,
       durationSeconds,
       backspaceCount,
       examId,
@@ -181,7 +183,7 @@ export const TypingEngine: React.FC<TypingEngineProps> = ({
       examName: examId === 'cpct' ? 'MP CPCT' : examId ? examId.toUpperCase() : 'General Practice',
       language: passage.language,
       keyboardLayout,
-      durationSeconds: Math.max(1, elapsedSeconds),
+      durationSeconds: Math.round(finalElapsed),
       passageTitle: passage.title,
       passageId: passage.id,
       metrics: finalMetrics
@@ -200,21 +202,28 @@ export const TypingEngine: React.FC<TypingEngineProps> = ({
     onTestComplete
   ]);
 
-  // Main countdown/elapsed timer
+  // Main countdown/elapsed timer using wall-clock deltas
   useEffect(() => {
     if (isActive && !isPaused && !isFinished) {
+      lastTickRef.current = Date.now();
       timerRef.current = window.setInterval(() => {
+        const now = Date.now();
+        const delta = lastTickRef.current ? (now - lastTickRef.current) / 1000 : 0.25;
+        lastTickRef.current = now;
         setElapsedSeconds((prev) => {
-          const next = prev + 1;
+          const next = prev + delta;
           if (next >= durationSeconds) {
             clearInterval(timerRef.current!);
             return durationSeconds;
           }
           return next;
         });
-      }, 1000);
-    } else if (timerRef.current) {
-      clearInterval(timerRef.current);
+      }, 250);
+    } else {
+      lastTickRef.current = null;
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
     }
 
     return () => {
@@ -238,6 +247,7 @@ export const TypingEngine: React.FC<TypingEngineProps> = ({
     if (isFinished) return;
 
     if (!isActive && !isPaused && e.key.length === 1) {
+      lastTickRef.current = Date.now();
       setIsActive(true);
     }
 
@@ -259,9 +269,21 @@ export const TypingEngine: React.FC<TypingEngineProps> = ({
       setBackspaceCount((prev) => prev + 1);
     }
 
-    // Virtual Remington transliteration for physical QWERTY keyboards without native Hindi IME
-    if (passage.language === 'hindi' && useVirtualRemington && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
-      const converted = translatePhysicalKeyToHindi(e.key, e.shiftKey, (keyboardLayout as HindiKeyboardLayout) || 'remington_gail');
+    // Virtual Remington/InScript transliteration for physical QWERTY keyboards without native Hindi IME
+    if (
+      passage.language === 'hindi' &&
+      useVirtualRemington &&
+      e.key.length === 1 &&
+      e.key !== ' ' &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      !e.metaKey
+    ) {
+      const converted = translatePhysicalKeyToHindi(
+        e.key,
+        e.shiftKey,
+        (keyboardLayout as HindiKeyboardLayout) || 'remington_gail'
+      );
       if (converted) {
         e.preventDefault();
         setTypedText((prev) => {
@@ -280,14 +302,17 @@ export const TypingEngine: React.FC<TypingEngineProps> = ({
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     if (isFinished || isPaused) return;
 
-    // If using virtual Remington, handled in onKeyDown
-    if (passage.language === 'hindi' && useVirtualRemington) {
-      return;
-    }
-
-    const val = e.target.value;
+    let val = e.target.value;
     if (!isActive && val.length > 0) {
       setIsActive(true);
+    }
+
+    if (passage.language === 'hindi' && useVirtualRemington && val.length > typedText.length) {
+      val = transliterateNewInputToHindi(
+        typedText,
+        val,
+        (keyboardLayout as HindiKeyboardLayout) || 'remington_gail'
+      );
     }
 
     if (val.length <= targetText.length + 20) {

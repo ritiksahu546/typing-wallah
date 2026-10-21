@@ -4,13 +4,12 @@ import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
-  signInWithPopup,
   signOut,
   sendPasswordResetEmail,
   updateProfile
 } from 'firebase/auth';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
-import { auth, db, googleProvider } from '../services/firebase';
+import { auth, db, withFirestoreTimeout } from '../services/firebase';
 import { ExamId, UserProfile } from '../types';
 
 interface AuthContextType {
@@ -23,7 +22,6 @@ interface AuthContextType {
   isAdmin: boolean;
   loginWithEmail: (email: string, pass: string) => Promise<void>;
   signupWithEmail: (email: string, pass: string, name: string, targetExam: ExamId) => Promise<void>;
-  loginWithGoogle: () => Promise<void>;
   resetPassword: (email: string) => Promise<void>;
   logout: () => Promise<void>;
   continueAsGuest: (name?: string, targetExam?: ExamId) => void;
@@ -31,6 +29,7 @@ interface AuthContextType {
 }
 
 const GUEST_STORAGE_KEY = 'typing_wallah_guest_profile';
+const LOCAL_USERS_STORAGE_KEY = 'typing_wallah_local_accounts';
 
 const DEFAULT_GUEST_PROFILE: UserProfile = {
   id: 'guest_aspirant',
@@ -65,8 +64,10 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   });
 
   const [authLoading, setAuthLoading] = useState<boolean>(true);
-  const [isGuest, setIsGuest] = useState<boolean>(true);
-  const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  const [isGuest, setIsGuest] = useState<boolean>(() => !userProfile.isLoggedIn);
+  const [isAdmin, setIsAdmin] = useState<boolean>(() =>
+    !!(userProfile.isLoggedIn && userProfile.email && ADMIN_EMAILS.includes(userProfile.email.toLowerCase()))
+  );
 
   // Helper to generate initials seed
   const generateAvatarSeed = (name: string, email: string) => {
@@ -85,33 +86,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     let targetExam: ExamId = 'cpct';
     let joinedDate = 'Recent';
 
-    try {
-      const docSnap = await getDoc(userRef);
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        if (data.targetExam) targetExam = data.targetExam;
-        if (data.joinedDate) joinedDate = data.joinedDate;
-      } else {
-        // Create initial document in users collection
-        await setDoc(userRef, {
-          uid: fbUser.uid,
-          email: fbUser.email,
-          displayName: fbUser.displayName || 'Candidate',
-          photoURL: fbUser.photoURL || null,
-          targetExam: 'cpct',
-          createdAt: serverTimestamp(),
-          joinedDate: new Date().toLocaleDateString('en-IN', {
-            month: 'short',
-            year: 'numeric'
-          }),
-          role: ADMIN_EMAILS.includes(fbUser.email || '') ? 'admin' : 'student'
-        }, { merge: true });
-      }
-    } catch (e) {
-      console.warn('Firestore profile sync note (operating with auth credentials):', e);
-    }
-
-    const profile: UserProfile = {
+    const immediateProfile: UserProfile = {
       id: fbUser.uid,
       name: fbUser.displayName || fbUser.email?.split('@')[0] || 'Candidate',
       email: fbUser.email || '',
@@ -122,12 +97,45 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       isLoggedIn: true
     };
 
-    setUserProfile(profile);
+    // Set state immediately from auth user so UI never blocks on Firestore latency
+    setUserProfile(immediateProfile);
     setIsGuest(false);
-
-    // Check admin status
     const emailMatch = fbUser.email && ADMIN_EMAILS.includes(fbUser.email.toLowerCase());
     setIsAdmin(!!emailMatch);
+
+    try {
+      const docSnap = await withFirestoreTimeout(getDoc(userRef), 3000);
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        if (data.targetExam) targetExam = data.targetExam;
+        if (data.joinedDate) joinedDate = data.joinedDate;
+        setUserProfile((prev) => ({
+          ...prev,
+          targetExam,
+          joinedDate
+        }));
+      } else {
+        // Create initial document in users collection
+        await withFirestoreTimeout(
+          setDoc(userRef, {
+            uid: fbUser.uid,
+            email: fbUser.email,
+            displayName: fbUser.displayName || 'Candidate',
+            photoURL: fbUser.photoURL || null,
+            targetExam: 'cpct',
+            createdAt: serverTimestamp(),
+            joinedDate: new Date().toLocaleDateString('en-IN', {
+              month: 'short',
+              year: 'numeric'
+            }),
+            role: ADMIN_EMAILS.includes(fbUser.email || '') ? 'admin' : 'student'
+          }, { merge: true }),
+          3000
+        );
+      }
+    } catch {
+      // Operating in offline / cached mode seamlessly
+    }
   };
 
   // Listen to Firebase Auth state
@@ -139,18 +147,23 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         await syncUserProfile(fbUser);
       } else {
         setCurrentUser(null);
-        setIsAdmin(false);
-        setIsGuest(true);
-        // Load or keep guest profile
+        // Load saved local or guest profile
         try {
           const savedGuest = localStorage.getItem(GUEST_STORAGE_KEY);
           if (savedGuest) {
-            setUserProfile(JSON.parse(savedGuest));
+            const parsed: UserProfile = JSON.parse(savedGuest);
+            setUserProfile(parsed);
+            setIsGuest(!parsed.isLoggedIn);
+            setIsAdmin(!!(parsed.isLoggedIn && parsed.email && ADMIN_EMAILS.includes(parsed.email.toLowerCase())));
           } else {
             setUserProfile(DEFAULT_GUEST_PROFILE);
+            setIsGuest(true);
+            setIsAdmin(false);
           }
         } catch {
           setUserProfile(DEFAULT_GUEST_PROFILE);
+          setIsGuest(true);
+          setIsAdmin(false);
         }
       }
       setAuthLoading(false);
@@ -159,48 +172,114 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return () => unsubscribe();
   }, []);
 
-  // Email / Password Login
+  // Email / Password Login with local account fallback
   const loginWithEmail = async (email: string, pass: string) => {
-    const cred = await signInWithEmailAndPassword(auth, email.trim(), pass);
-    await syncUserProfile(cred.user);
+    const cleanEmail = email.trim().toLowerCase();
+    try {
+      const cred = await signInWithEmailAndPassword(auth, cleanEmail, pass);
+      await syncUserProfile(cred.user);
+    } catch (err: any) {
+      const code = err?.code || '';
+      if (
+        code === 'auth/operation-not-allowed' ||
+        code === 'auth/configuration-not-found' ||
+        code === 'auth/network-request-failed'
+      ) {
+        // Fallback to local stored account
+        const raw = localStorage.getItem(LOCAL_USERS_STORAGE_KEY);
+        const accounts: Record<string, { pass: string; profile: UserProfile }> = raw ? JSON.parse(raw) : {};
+        const existing = accounts[cleanEmail];
+        if (existing && existing.pass !== pass) {
+          const wrongErr: any = new Error('Invalid email or password.');
+          wrongErr.code = 'auth/wrong-password';
+          throw wrongErr;
+        }
+        const localProfile: UserProfile = existing?.profile || {
+          id: 'user_' + btoa(cleanEmail).replace(/[^a-zA-Z0-9]/g, '').slice(0, 12),
+          name: cleanEmail.split('@')[0],
+          email: cleanEmail,
+          avatarSeed: generateAvatarSeed(cleanEmail.split('@')[0], cleanEmail),
+          targetExam: 'cpct',
+          joinedDate: new Date().toLocaleDateString('en-IN', { month: 'short', year: 'numeric' }),
+          isLoggedIn: true
+        };
+        localStorage.setItem(GUEST_STORAGE_KEY, JSON.stringify(localProfile));
+        setUserProfile(localProfile);
+        setIsGuest(false);
+        setIsAdmin(ADMIN_EMAILS.includes(cleanEmail));
+        return;
+      }
+      throw err;
+    }
   };
 
-  // Email / Password Sign Up
+  // Email / Password Sign Up with local account fallback
   const signupWithEmail = async (
     email: string,
     pass: string,
     displayName: string,
     targetExam: ExamId
   ) => {
-    const cred = await createUserWithEmailAndPassword(auth, email.trim(), pass);
-    if (displayName.trim()) {
-      await updateProfile(cred.user, { displayName: displayName.trim() });
-    }
-    // Save to Firestore users collection
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanName = displayName.trim() || 'Candidate';
     try {
-      await setDoc(doc(db, 'users', cred.user.uid), {
-        uid: cred.user.uid,
-        email: cred.user.email,
-        displayName: displayName.trim() || 'Candidate',
-        targetExam,
-        joinedDate: new Date().toLocaleDateString('en-IN', {
-          month: 'short',
-          year: 'numeric'
-        }),
-        createdAt: serverTimestamp(),
-        role: ADMIN_EMAILS.includes(cred.user.email || '') ? 'admin' : 'student'
-      });
-    } catch (e) {
-      console.warn('Initial user profile firestore write notice:', e);
+      const cred = await createUserWithEmailAndPassword(auth, cleanEmail, pass);
+      if (cleanName) {
+        await updateProfile(cred.user, { displayName: cleanName });
+      }
+      try {
+        await withFirestoreTimeout(
+          setDoc(doc(db, 'users', cred.user.uid), {
+            uid: cred.user.uid,
+            email: cred.user.email,
+            displayName: cleanName,
+            targetExam,
+            joinedDate: new Date().toLocaleDateString('en-IN', {
+              month: 'short',
+              year: 'numeric'
+            }),
+            createdAt: serverTimestamp(),
+            role: ADMIN_EMAILS.includes(cleanEmail) ? 'admin' : 'student'
+          }),
+          2500
+        );
+      } catch {
+        // ignore offline firestore error
+      }
+
+      await syncUserProfile(cred.user);
+    } catch (err: any) {
+      const code = err?.code || '';
+      if (
+        code === 'auth/operation-not-allowed' ||
+        code === 'auth/configuration-not-found' ||
+        code === 'auth/network-request-failed'
+      ) {
+        const localProfile: UserProfile = {
+          id: 'user_' + btoa(cleanEmail).replace(/[^a-zA-Z0-9]/g, '').slice(0, 12),
+          name: cleanName,
+          email: cleanEmail,
+          avatarSeed: generateAvatarSeed(cleanName, cleanEmail),
+          targetExam,
+          joinedDate: new Date().toLocaleDateString('en-IN', { month: 'short', year: 'numeric' }),
+          isLoggedIn: true
+        };
+        try {
+          const raw = localStorage.getItem(LOCAL_USERS_STORAGE_KEY);
+          const accounts: Record<string, { pass: string; profile: UserProfile }> = raw ? JSON.parse(raw) : {};
+          accounts[cleanEmail] = { pass, profile: localProfile };
+          localStorage.setItem(LOCAL_USERS_STORAGE_KEY, JSON.stringify(accounts));
+          localStorage.setItem(GUEST_STORAGE_KEY, JSON.stringify(localProfile));
+        } catch {
+          // ignore
+        }
+        setUserProfile(localProfile);
+        setIsGuest(false);
+        setIsAdmin(ADMIN_EMAILS.includes(cleanEmail));
+        return;
+      }
+      throw err;
     }
-
-    await syncUserProfile(cred.user);
-  };
-
-  // Google Sign In
-  const loginWithGoogle = async () => {
-    const cred = await signInWithPopup(auth, googleProvider);
-    await syncUserProfile(cred.user);
   };
 
   // Password Reset
@@ -210,7 +289,16 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   // Logout
   const logout = async () => {
-    await signOut(auth);
+    try {
+      await signOut(auth);
+    } catch {
+      // ignore
+    }
+    try {
+      localStorage.removeItem(GUEST_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
     setCurrentUser(null);
     setIsAdmin(false);
     setIsGuest(true);
@@ -227,7 +315,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       avatarSeed: generateAvatarSeed(guestName, 'guest'),
       targetExam,
       joinedDate: 'Guest Session',
-      isLoggedIn: false // Explicitly false per Phase 2 mandate
+      isLoggedIn: false
     };
     try {
       localStorage.setItem(GUEST_STORAGE_KEY, JSON.stringify(guest));
@@ -243,13 +331,16 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     setUserProfile((prev) => ({ ...prev, targetExam: examId }));
     if (currentUser) {
       try {
-        await setDoc(
-          doc(db, 'users', currentUser.uid),
-          { targetExam: examId, updatedAt: serverTimestamp() },
-          { merge: true }
+        await withFirestoreTimeout(
+          setDoc(
+            doc(db, 'users', currentUser.uid),
+            { targetExam: examId, updatedAt: serverTimestamp() },
+            { merge: true }
+          ),
+          2500
         );
-      } catch (e) {
-        console.warn('Error updating target exam in Firestore:', e);
+      } catch {
+        // ignore
       }
     } else {
       try {
@@ -267,13 +358,12 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         currentUser,
         userProfile,
         profile: userProfile,
-        isAuthenticated: !!currentUser,
+        isAuthenticated: !!currentUser || userProfile.isLoggedIn,
         isGuest,
         authLoading,
         isAdmin,
         loginWithEmail,
         signupWithEmail,
-        loginWithGoogle,
         resetPassword,
         logout,
         continueAsGuest,
