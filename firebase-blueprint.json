@@ -1,0 +1,142 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Registered candidate profile",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "targetExam": { "type": "string" },
+        "role": { "type": "string" },
+        "joinedDate": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    },
+    "UserResult": {
+      "title": "UserResult",
+      "description": "Candidate typing test attempt result",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "examId": { "type": "string" },
+        "examName": { "type": "string" },
+        "language": { "type": "string" },
+        "keyboardLayout": { "type": "string" },
+        "durationSeconds": { "type": "number" },
+        "timestamp": { "type": "number" },
+        "metrics": { "type": "object" }
+      },
+      "required": ["userId", "metrics", "timestamp"]
+    },
+    "LeaderboardEntry": {
+      "title": "LeaderboardEntry",
+      "description": "High score benchmark entry on public leaderboard",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "exam": { "type": "string" },
+        "examId": { "type": "string" },
+        "language": { "type": "string" },
+        "netWpm": { "type": "number" },
+        "grossWpm": { "type": "number" },
+        "accuracy": { "type": "number" },
+        "timestamp": { "type": "number" },
+        "date": { "type": "string" }
+      },
+      "required": ["userId", "netWpm", "accuracy"]
+    },
+    "CourseProgress": {
+      "title": "CourseProgress",
+      "description": "Student touch typing course progress and locked/unlocked state",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "currentLessonNumber": { "type": "number" },
+        "highestUnlockedLessonNumber": { "type": "number" },
+        "completedLessonIds": { "type": "array", "items": { "type": "string" } },
+        "bestWpm": { "type": "number" },
+        "avgWpm": { "type": "number" },
+        "avgAccuracy": { "type": "number" },
+        "totalAttempts": { "type": "number" },
+        "passedAttempts": { "type": "number" },
+        "currentStreak": { "type": "number" },
+        "lastActiveDate": { "type": "string" },
+        "lastUpdated": { "type": "number" }
+      },
+      "required": ["userId", "highestUnlockedLessonNumber"]
+    },
+    "LessonAttempt": {
+      "title": "LessonAttempt",
+      "description": "Student lesson test attempt history record",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "lessonId": { "type": "string" },
+        "lessonNumber": { "type": "number" },
+        "lessonName": { "type": "string" },
+        "netWpm": { "type": "number" },
+        "grossWpm": { "type": "number" },
+        "accuracy": { "type": "number" },
+        "errors": { "type": "number" },
+        "backspaces": { "type": "number" },
+        "durationSeconds": { "type": "number" },
+        "passed": { "type": "boolean" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["userId", "lessonId", "passed", "timestamp"]
+    },
+    "CourseLesson": {
+      "title": "CourseLesson",
+      "description": "Admin configurable touch typing lesson content",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "lessonNumber": { "type": "number" },
+        "level": { "type": "number" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "type": { "type": "string" },
+        "targetWpm": { "type": "number" },
+        "minAccuracy": { "type": "number" },
+        "isPro": { "type": "boolean" },
+        "status": { "type": "string" }
+      },
+      "required": ["lessonNumber", "name", "level"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/users/{userId}/results/{resultId}": {
+      "schema": "UserResult",
+      "description": "User specific test results subcollection"
+    },
+    "/users/{userId}/learning_progress/course": {
+      "schema": "CourseProgress",
+      "description": "User specific course unlock and progress state"
+    },
+    "/users/{userId}/learning_results/{resultId}": {
+      "schema": "LessonAttempt",
+      "description": "User lesson test attempts"
+    },
+    "/learning_lessons/{lessonId}": {
+      "schema": "CourseLesson",
+      "description": "Admin managed lesson definitions"
+    },
+    "/user_results/{resultId}": {
+      "schema": "UserResult",
+      "description": "Audit collection of test results"
+    },
+    "/leaderboard/{entryId}": {
+      "schema": "LeaderboardEntry",
+      "description": "Public high score board entries"
+    }
+  }
+}

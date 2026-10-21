@@ -1,0 +1,89 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'gig.ritik546@gmail.com' ||
+        request.auth.token.email == 'admin@typingwallah.in'
+      );
+    }
+
+    // User profile documents
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow create, update: if isOwner(userId);
+      allow delete: if isAdmin();
+
+      // User's personal test results
+      match /results/{resultId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) &&
+          request.resource.data.userId == userId &&
+          request.resource.data.metrics.netWpm is number &&
+          request.resource.data.metrics.accuracy is number;
+        allow update, delete: if isOwner(userId) || isAdmin();
+      }
+
+      // User's course progress and locked/unlocked state
+      match /learning_progress/{courseId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId) || isAdmin();
+        allow delete: if isAdmin();
+      }
+
+      // User's individual lesson test results history
+      match /learning_results/{resultId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) &&
+          request.resource.data.userId == userId &&
+          request.resource.data.netWpm is number &&
+          request.resource.data.accuracy is number;
+        allow update, delete: if isOwner(userId) || isAdmin();
+      }
+    }
+
+    // Touch typing lessons repository (read by all, managed by admin)
+    match /learning_lessons/{lessonId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // user_results collection for backwards compatibility & audit
+    match /user_results/{resultId} {
+      allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    // leaderboard collection: public read, authenticated user write
+    match /leaderboard/{entryId} {
+      allow read: if true;
+      allow create, update: if isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.netWpm is number &&
+        request.resource.data.accuracy is number;
+      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    // Passages repository
+    match /passages/{passageId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Exam configurations
+    match /exams/{examId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}

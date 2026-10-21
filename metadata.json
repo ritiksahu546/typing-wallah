@@ -1,0 +1,6 @@
+{
+  "name": "Typing Wallah",
+  "description": "Professional Indian government-exam typing practice platform for CPCT, SSC CHSL, CGL DEST, RRB NTPC, High Court, and State exams with realistic exam-style tests in Hindi and English.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
