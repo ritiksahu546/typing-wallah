@@ -57,7 +57,7 @@ export const LearnTouchTypingPage: React.FC<LearnTouchTypingPageProps> = ({
   onStartExam,
   onNavigate
 }) => {
-  const { currentUser, profile } = useAuth();
+  const { currentUser, profile, isAdmin } = useAuth();
 
   // Mode: 'course' (92-lesson sequential curriculum) vs 'free-practice' (classic explorer)
   const [activeMode, setActiveMode] = useState<'course' | 'free-practice'>('course');
@@ -330,14 +330,16 @@ export const LearnTouchTypingPage: React.FC<LearnTouchTypingPageProps> = ({
                 <span>Dashboard</span>
               </button>
 
-              <button
-                type="button"
-                onClick={() => setIsAdminManagerOpen(true)}
-                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors cursor-pointer"
-                title="Admin Lesson CMS"
-              >
-                <Settings className="w-3.5 h-3.5" />
-              </button>
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => setIsAdminManagerOpen(true)}
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors cursor-pointer"
+                  title="Admin Lesson CMS"
+                >
+                  <Settings className="w-3.5 h-3.5" />
+                </button>
+              )}
             </>
           )}
 

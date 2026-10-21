@@ -222,5 +222,7 @@ export type ActivePage =
   | 'disclaimer'
   | 'privacy'
   | 'terms'
-  | 'seo-page';
+  | 'seo-page'
+  | '404';
+
 

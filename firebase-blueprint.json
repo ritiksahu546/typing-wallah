@@ -1,5 +1,16 @@
 {
   "entities": {
+    "AdminRole": {
+      "title": "AdminRole",
+      "description": "Server-managed administrator role registry (read-only to clients)",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "grantedAt": { "type": "string" },
+        "revoked": { "type": "boolean" }
+      },
+      "required": ["uid"]
+    },
     "User": {
       "title": "User",
       "description": "Registered candidate profile",
@@ -9,17 +20,18 @@
         "email": { "type": "string" },
         "displayName": { "type": "string" },
         "targetExam": { "type": "string" },
-        "role": { "type": "string" },
+        "referralCode": { "type": "string" },
         "joinedDate": { "type": "string" }
       },
       "required": ["uid", "email"]
     },
     "UserResult": {
       "title": "UserResult",
-      "description": "Candidate typing test attempt result",
+      "description": "Immutable candidate typing test attempt result",
       "type": "object",
       "properties": {
         "userId": { "type": "string" },
+        "testId": { "type": "string" },
         "username": { "type": "string" },
         "userEmail": { "type": "string" },
         "examId": { "type": "string" },
@@ -34,11 +46,13 @@
     },
     "LeaderboardEntry": {
       "title": "LeaderboardEntry",
-      "description": "High score benchmark entry on public leaderboard",
+      "description": "High score benchmark entry on public leaderboard backed by an immutable UserResult",
       "type": "object",
       "properties": {
         "userId": { "type": "string" },
+        "testId": { "type": "string" },
         "username": { "type": "string" },
+        "photoURL": { "type": "string" },
         "exam": { "type": "string" },
         "examId": { "type": "string" },
         "language": { "type": "string" },
@@ -48,7 +62,7 @@
         "timestamp": { "type": "number" },
         "date": { "type": "string" }
       },
-      "required": ["userId", "netWpm", "accuracy"]
+      "required": ["userId", "testId", "netWpm", "grossWpm", "accuracy"]
     },
     "CourseProgress": {
       "title": "CourseProgress",
@@ -72,7 +86,7 @@
     },
     "LessonAttempt": {
       "title": "LessonAttempt",
-      "description": "Student lesson test attempt history record",
+      "description": "Immutable student lesson test attempt history record",
       "type": "object",
       "properties": {
         "userId": { "type": "string" },
@@ -107,16 +121,61 @@
         "status": { "type": "string" }
       },
       "required": ["lessonNumber", "name", "level"]
+    },
+    "Subscription": {
+      "title": "Subscription",
+      "description": "User subscription state managed strictly by server/admin",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "plan": { "type": "string" },
+        "status": { "type": "string" },
+        "startDate": { "type": "string" },
+        "expiryDate": { "type": "string" },
+        "source": { "type": "string" }
+      },
+      "required": ["uid", "plan", "status"]
+    },
+    "ReferralCode": {
+      "title": "ReferralCode",
+      "description": "Immutable lookup mapping referral code to registered owner UID",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string" },
+        "uid": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["code", "uid", "createdAt"]
+    },
+    "Referral": {
+      "title": "Referral",
+      "description": "Verified referral redemption record (one per referred user UID)",
+      "type": "object",
+      "properties": {
+        "referrerUid": { "type": "string" },
+        "referrerCode": { "type": "string" },
+        "referredUid": { "type": "string" },
+        "referredEmail": { "type": "string" },
+        "referredName": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "daysAwarded": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["referrerUid", "referrerCode", "referredUid", "timestamp", "status"]
     }
   },
   "firestore": {
+    "/admins/{adminId}": {
+      "schema": "AdminRole",
+      "description": "Server-assigned administrator accounts"
+    },
     "/users/{userId}": {
       "schema": "User",
       "description": "User profiles"
     },
     "/users/{userId}/results/{resultId}": {
       "schema": "UserResult",
-      "description": "User specific test results subcollection"
+      "description": "User specific immutable test results subcollection"
     },
     "/users/{userId}/learning_progress/course": {
       "schema": "CourseProgress",
@@ -124,7 +183,7 @@
     },
     "/users/{userId}/learning_results/{resultId}": {
       "schema": "LessonAttempt",
-      "description": "User lesson test attempts"
+      "description": "User immutable lesson test attempts"
     },
     "/learning_lessons/{lessonId}": {
       "schema": "CourseLesson",
@@ -132,11 +191,23 @@
     },
     "/user_results/{resultId}": {
       "schema": "UserResult",
-      "description": "Audit collection of test results"
+      "description": "Immutable audit collection of test results"
     },
     "/leaderboard/{entryId}": {
       "schema": "LeaderboardEntry",
       "description": "Public high score board entries"
+    },
+    "/subscriptions/{userId}": {
+      "schema": "Subscription",
+      "description": "Server-managed user subscription records"
+    },
+    "/referral_codes/{code}": {
+      "schema": "ReferralCode",
+      "description": "Registered user referral code lookup registry"
+    },
+    "/referrals/{referredUid}": {
+      "schema": "Referral",
+      "description": "One-time verified referral record per referred user"
     }
   }
 }

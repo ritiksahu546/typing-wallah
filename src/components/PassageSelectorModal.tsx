@@ -80,11 +80,6 @@ export const PassageSelectorModal: React.FC<PassageSelectorModalProps> = ({
   const proPassages = filteredPassages.filter((p) => p.isPro);
 
   const handlePassageClick = (passage: Passage) => {
-    if (passage.isPro && !isUserPro) {
-      // Locked PRO passage: open Subscription Modal
-      onOpenSubscriptionModal();
-      return;
-    }
     onSelectPassage(passage);
     onClose();
   };
@@ -265,7 +260,7 @@ export const PassageSelectorModal: React.FC<PassageSelectorModalProps> = ({
               <div className="space-y-2">
                 {proPassages.map((passage) => {
                   const isSelected = passage.id === currentPassageId;
-                  const isLocked = !isUserPro;
+                  const isLocked = false;
 
                   return (
                     <button
@@ -349,8 +344,8 @@ export const PassageSelectorModal: React.FC<PassageSelectorModalProps> = ({
                 <CheckCircle2 className="w-3.5 h-3.5" /> PRO Membership Active: All Passages Unlocked
               </span>
             ) : (
-              <span className="flex items-center gap-1">
-                <Lock className="w-3.5 h-3.5 text-amber-600" /> Free Plan: Standard passages unlocked
+              <span className="text-emerald-700 font-semibold flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5" /> Free Practice Access: All Passages Unlocked
               </span>
             )}
           </span>

@@ -29,6 +29,7 @@ export const AdminLessonManagerModal: React.FC<AdminLessonManagerModalProps> = (
   const [isCreating, setIsCreating] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -79,9 +80,13 @@ export const AdminLessonManagerModal: React.FC<AdminLessonManagerModalProps> = (
   };
 
   const handleDelete = (lessonId: string) => {
-    if (!window.confirm('Are you sure you want to remove this lesson?')) return;
+    if (confirmDeleteId !== lessonId) {
+      setConfirmDeleteId(lessonId);
+      return;
+    }
     const updated = lessons.filter((l) => l.id !== lessonId);
     onLessonsUpdated(updated);
+    setConfirmDeleteId(null);
   };
 
   const filtered = searchQuery

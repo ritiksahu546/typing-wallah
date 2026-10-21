@@ -1,7 +1,11 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Helper functions
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
     function isAuthenticated() {
       return request.auth != null;
     }
@@ -10,99 +14,326 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    /**
+     * Trusted server-side admin verification:
+     * 1. Firebase Auth Custom Claims (`request.auth.token.admin == true` or `request.auth.token.role == 'admin'`)
+     * 2. Server-provisioned `/admins/{uid}` document (write-denied to all clients)
+     * Never trusts client-writable profile fields or unverified email addresses.
+     */
     function isAdmin() {
       return isAuthenticated() && (
-        request.auth.token.email == 'gig.ritik546@gmail.com' ||
-        request.auth.token.email == 'admin@typingwallah.in'
+        request.auth.token.admin == true ||
+        request.auth.token.role == 'admin' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
 
-    // User profile documents
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid']) &&
+             data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'targetExam', 'referralCode', 'joinedDate', 'createdAt', 'updatedAt']) &&
+             data.uid == request.auth.uid &&
+             (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 80)) &&
+             (!('email' in data) || (data.email is string && data.email.size() <= 120)) &&
+             (!('targetExam' in data) || (data.targetExam is string && data.targetExam.size() <= 40)) &&
+             (!('referralCode' in data) || (data.referralCode is string && data.referralCode.matches('^TW-[A-Z0-9]{6,10}$')));
+    }
+
+    function isValidResultMetrics(metrics, durationSeconds) {
+      return metrics is map &&
+             metrics.keys().hasAll(['netWpm', 'grossWpm', 'accuracy', 'totalChars', 'correctChars', 'incorrectChars', 'errors', 'backspaceCount', 'keyDepressions', 'elapsedSeconds', 'isQualified']) &&
+             metrics.keys().hasOnly(['netWpm', 'grossWpm', 'accuracy', 'totalChars', 'correctChars', 'incorrectChars', 'errors', 'backspaceCount', 'keyDepressions', 'elapsedSeconds', 'kdph', 'isQualified', 'grade']) &&
+             metrics.netWpm is number && metrics.netWpm >= 0 && metrics.netWpm <= 250 &&
+             metrics.grossWpm is number && metrics.grossWpm >= 0 && metrics.grossWpm <= 300 &&
+             metrics.netWpm <= metrics.grossWpm + 0.01 &&
+             metrics.accuracy is number && metrics.accuracy >= 0 && metrics.accuracy <= 100 &&
+             metrics.totalChars is number && metrics.totalChars >= 0 && metrics.totalChars <= 50000 &&
+             metrics.correctChars is number && metrics.correctChars >= 0 && metrics.correctChars <= metrics.totalChars &&
+             metrics.incorrectChars is number && metrics.incorrectChars >= 0 &&
+             (metrics.correctChars + metrics.incorrectChars == metrics.totalChars) &&
+             metrics.errors is number && metrics.errors >= 0 && metrics.errors <= 50000 &&
+             metrics.backspaceCount is number && metrics.backspaceCount >= 0 && metrics.backspaceCount <= 50000 &&
+             metrics.keyDepressions is number && metrics.keyDepressions >= metrics.totalChars && metrics.keyDepressions <= 60000 &&
+             metrics.elapsedSeconds is number && metrics.elapsedSeconds >= 1 && metrics.elapsedSeconds <= durationSeconds &&
+             metrics.isQualified is bool &&
+             // Mathematical WPM consistency: grossWpm must match (totalChars / 5) / (elapsedSeconds / 60) within rounding tolerance
+             (
+               (metrics.totalChars == 0 && metrics.grossWpm == 0 && metrics.netWpm == 0) ||
+               (
+                 metrics.totalChars > 0 &&
+                 (metrics.grossWpm * metrics.elapsedSeconds >= (metrics.totalChars * 12) - (metrics.elapsedSeconds * 5)) &&
+                 (metrics.grossWpm * metrics.elapsedSeconds <= (metrics.totalChars * 12) + (metrics.elapsedSeconds * 5))
+               )
+             ) &&
+             // Mathematical accuracy consistency: accuracy must match (correctChars / totalChars) * 100 within rounding tolerance
+             (
+               metrics.totalChars == 0 ||
+               (
+                 (metrics.accuracy * metrics.totalChars >= (metrics.correctChars * 100) - (metrics.totalChars * 2)) &&
+                 (metrics.accuracy * metrics.totalChars <= (metrics.correctChars * 100) + (metrics.totalChars * 2))
+               )
+             );
+    }
+
+    function isValidTestResultDoc(data) {
+      return data.keys().hasAll(['userId', 'testId', 'examId', 'examName', 'language', 'keyboardLayout', 'durationSeconds', 'passageTitle', 'passageId', 'metrics', 'timestamp', 'createdAt']) &&
+             data.keys().hasOnly(['userId', 'userEmail', 'username', 'photoURL', 'testId', 'examId', 'examName', 'language', 'keyboardLayout', 'durationSeconds', 'passageTitle', 'passageId', 'metrics', 'timestamp', 'createdAt']) &&
+             data.userId == request.auth.uid &&
+             data.testId is string && data.testId.size() >= 3 && data.testId.size() <= 64 &&
+             data.examId is string && data.examId.size() >= 2 && data.examId.size() <= 40 &&
+             data.examName is string && data.examName.size() >= 1 && data.examName.size() <= 120 &&
+             data.language in ['english', 'hindi'] &&
+             data.keyboardLayout is string && data.keyboardLayout.size() >= 1 && data.keyboardLayout.size() <= 40 &&
+             data.passageTitle is string && data.passageTitle.size() <= 160 &&
+             data.passageId is string && data.passageId.size() <= 80 &&
+             data.durationSeconds is number && data.durationSeconds >= 10 && data.durationSeconds <= 3600 &&
+             data.timestamp is number &&
+             data.createdAt == request.time &&
+             isValidResultMetrics(data.metrics, data.durationSeconds);
+    }
+
+    /**
+     * Verifies that a leaderboard entry is backed by an immutable, mathematically validated
+     * test result document in `/users/{uid}/results/{testId}` rather than trusting raw client-reported WPM.
+     */
+    function isBackedByVerifiedResult(data) {
+      let resultPath = /databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId);
+      return exists(resultPath) &&
+             get(resultPath).data.userId == request.auth.uid &&
+             get(resultPath).data.examId == data.examId &&
+             get(resultPath).data.language == data.language &&
+             get(resultPath).data.metrics.netWpm == data.netWpm &&
+             get(resultPath).data.metrics.grossWpm == data.grossWpm &&
+             get(resultPath).data.metrics.accuracy == data.accuracy &&
+             get(resultPath).data.metrics.totalChars >= 25 &&
+             get(resultPath).data.metrics.elapsedSeconds >= 10;
+    }
+
+    function isValidLeaderboardEntry(data) {
+      return data.keys().hasAll(['userId', 'testId', 'username', 'photoURL', 'netWpm', 'grossWpm', 'accuracy', 'exam', 'examId', 'language', 'date', 'timestamp']) &&
+             data.keys().hasOnly(['userId', 'testId', 'username', 'photoURL', 'netWpm', 'grossWpm', 'accuracy', 'exam', 'examId', 'language', 'date', 'timestamp']) &&
+             data.userId == request.auth.uid &&
+             data.testId is string && data.testId.size() >= 3 && data.testId.size() <= 64 &&
+             data.username is string && data.username.size() >= 1 && data.username.size() <= 60 &&
+             data.photoURL is string && data.photoURL.size() <= 500 &&
+             data.exam is string && data.exam.size() >= 1 && data.exam.size() <= 120 &&
+             data.examId is string && data.examId.size() >= 2 && data.examId.size() <= 40 &&
+             data.language in ['english', 'hindi'] &&
+             data.date is string && data.date.size() >= 1 && data.date.size() <= 40 &&
+             data.netWpm is number && data.netWpm >= 0 && data.netWpm <= 250 &&
+             data.grossWpm is number && data.grossWpm >= 0 && data.grossWpm <= 300 &&
+             data.netWpm <= data.grossWpm + 0.01 &&
+             data.accuracy is number && data.accuracy >= 0 && data.accuracy <= 100 &&
+             data.timestamp == request.time &&
+             isBackedByVerifiedResult(data);
+    }
+
+    function isValidCourseProgress(data, userId) {
+      return data.keys().hasAll(['userId', 'highestUnlockedLessonNumber']) &&
+             data.keys().hasOnly(['userId', 'currentLessonNumber', 'highestUnlockedLessonNumber', 'completedLessonIds', 'bestWpm', 'avgWpm', 'avgAccuracy', 'totalAttempts', 'passedAttempts', 'currentStreak', 'lastActiveDate', 'lastUpdated']) &&
+             data.userId == userId &&
+             data.highestUnlockedLessonNumber is number &&
+             data.highestUnlockedLessonNumber >= 1 &&
+             data.highestUnlockedLessonNumber <= 120 &&
+             (!('bestWpm' in data) || (data.bestWpm is number && data.bestWpm >= 0 && data.bestWpm <= 250)) &&
+             (!('avgAccuracy' in data) || (data.avgAccuracy is number && data.avgAccuracy >= 0 && data.avgAccuracy <= 100));
+    }
+
+    function isValidLessonAttempt(data, userId) {
+      return data.keys().hasAll(['userId', 'lessonId', 'netWpm', 'grossWpm', 'accuracy', 'passed', 'timestamp']) &&
+             data.keys().hasOnly(['userId', 'lessonId', 'lessonNumber', 'lessonName', 'netWpm', 'grossWpm', 'accuracy', 'errors', 'backspaces', 'durationSeconds', 'passed', 'timestamp', 'createdAt']) &&
+             data.userId == userId &&
+             data.lessonId is string && data.lessonId.size() <= 60 &&
+             data.netWpm is number && data.netWpm >= 0 && data.netWpm <= 250 &&
+             data.grossWpm is number && data.grossWpm >= 0 && data.grossWpm <= 300 &&
+             data.netWpm <= data.grossWpm + 0.01 &&
+             data.accuracy is number && data.accuracy >= 0 && data.accuracy <= 100 &&
+             data.passed is bool &&
+             data.timestamp is number;
+    }
+
+    function isValidReferralRecord(data, referredUid) {
+      return data.keys().hasAll(['referrerUid', 'referrerCode', 'referredUid', 'referredEmail', 'referredName', 'timestamp', 'daysAwarded', 'status', 'createdAt']) &&
+             data.keys().hasOnly(['referrerUid', 'referrerCode', 'referredUid', 'referredEmail', 'referredName', 'timestamp', 'daysAwarded', 'status', 'createdAt']) &&
+             data.referredUid == request.auth.uid &&
+             data.referredUid == referredUid &&
+             data.referrerUid is string &&
+             data.referrerUid.size() >= 4 &&
+             data.referrerUid != request.auth.uid &&
+             data.referrerCode is string &&
+             data.referrerCode.matches('^TW-[A-Z0-9]{6,10}$') &&
+             data.referredEmail is string && data.referredEmail.size() <= 120 &&
+             data.referredName is string && data.referredName.size() <= 80 &&
+             data.daysAwarded == 0 &&
+             data.status == 'recorded' &&
+             data.timestamp is number &&
+             data.createdAt == request.time;
+    }
+
+    // ===============================================================
+    // 0. Server-Managed Admin Registry (/admins/{adminId})
+    // ===============================================================
+    match /admins/{adminId} {
+      allow get: if isOwner(adminId) || isAdmin();
+      allow list: if isAdmin();
+      // Only assignable/revocable via Firebase Admin SDK or Google Cloud Console
+      allow create, update, delete: if false;
+    }
+
+    // ===============================================================
+    // 1. User Profiles & Personal Subcollections
+    // ===============================================================
     match /users/{userId} {
-      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
-      allow create, update: if isOwner(userId);
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+
+      // Ordinary users cannot set role, isPro, or proExpiryDate on creation
+      allow create: if isOwner(userId) &&
+                    isValidUserProfile(request.resource.data) &&
+                    !('role' in request.resource.data) &&
+                    !('isPro' in request.resource.data) &&
+                    !('proExpiryDate' in request.resource.data);
+
+      // Ordinary users cannot escalate role or modify subscription fields
+      allow update: if isAdmin() || (
+                      isOwner(userId) &&
+                      isValidUserProfile(request.resource.data) &&
+                      request.resource.data.uid == resource.data.uid &&
+                      !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'isPro', 'proExpiryDate', 'uid', 'createdAt'])
+                    );
+
       allow delete: if isAdmin();
 
-      // User's personal test results
+      // Immutable personal typing test results subcollection
       match /results/{resultId} {
         allow read: if isOwner(userId) || isAdmin();
         allow create: if isOwner(userId) &&
-          request.resource.data.userId == userId &&
-          request.resource.data.metrics.netWpm is number &&
-          request.resource.data.metrics.accuracy is number;
-        allow update, delete: if isOwner(userId) || isAdmin();
+                      !exists(/databases/$(database)/documents/users/$(userId)/results/$(resultId)) &&
+                      resultId == request.resource.data.testId &&
+                      isValidTestResultDoc(request.resource.data);
+        // Completed result records are strictly immutable
+        allow update, delete: if false;
       }
 
-      // User's course progress and locked/unlocked state
-      match /learning_progress/{courseId} {
+      // Personal touch-typing course progress subcollection
+      match /learning_progress/{docId} {
         allow read: if isOwner(userId) || isAdmin();
-        allow create, update: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId) && isValidCourseProgress(request.resource.data, userId);
         allow delete: if isAdmin();
       }
 
-      // User's individual lesson test results history
+      // Immutable personal touch-typing lesson attempts subcollection
       match /learning_results/{resultId} {
         allow read: if isOwner(userId) || isAdmin();
-        allow create: if isOwner(userId) &&
-          request.resource.data.userId == userId &&
-          request.resource.data.netWpm is number &&
-          request.resource.data.accuracy is number;
-        allow update, delete: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) && isValidLessonAttempt(request.resource.data, userId);
+        allow update, delete: if false;
       }
     }
 
-    // Touch typing lessons repository (read by all, managed by admin)
-    match /learning_lessons/{lessonId} {
+    // ===============================================================
+    // 2. Root Test Results Audit Collection (Immutable)
+    // ===============================================================
+    match /user_results/{resultId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() &&
+                    !exists(/databases/$(database)/documents/user_results/$(resultId)) &&
+                    resultId == (request.auth.uid + '_' + request.resource.data.testId) &&
+                    isValidTestResultDoc(request.resource.data);
+      // Completed audit result records are strictly immutable
+      allow update, delete: if false;
+    }
+
+    // ===============================================================
+    // 3. Public Leaderboard Collection (Deterministic & Verified Result Linked)
+    // ===============================================================
+    match /leaderboard/{entryId} {
       allow read: if true;
+
+      allow create: if isAuthenticated() &&
+                    entryId == (request.auth.uid + '_' + request.resource.data.examId + '_' + request.resource.data.language) &&
+                    isValidLeaderboardEntry(request.resource.data);
+
+      // Updates are only permitted when backed by a new distinct verified test result that strictly improves personal best
+      allow update: if isAuthenticated() &&
+                    resource.data.userId == request.auth.uid &&
+                    request.resource.data.examId == resource.data.examId &&
+                    request.resource.data.language == resource.data.language &&
+                    request.resource.data.testId != resource.data.testId &&
+                    entryId == (request.auth.uid + '_' + request.resource.data.examId + '_' + request.resource.data.language) &&
+                    isValidLeaderboardEntry(request.resource.data) &&
+                    (
+                      request.resource.data.netWpm > resource.data.netWpm ||
+                      (request.resource.data.netWpm == resource.data.netWpm && request.resource.data.accuracy > resource.data.accuracy)
+                    );
+
+      allow delete: if isAdmin();
+    }
+
+    // ===============================================================
+    // 4. Referral Code Registry & Verified One-Time Referrals
+    // ===============================================================
+    match /referral_codes/{code} {
+      allow get: if isAuthenticated();
+      allow list: if isAdmin();
+      // Referral codes are unique and permanently bound to their creator's UID upon creation
+      allow create: if isAuthenticated() &&
+                    !exists(/databases/$(database)/documents/referral_codes/$(code)) &&
+                    code.matches('^TW-[A-Z0-9]{6,10}$') &&
+                    request.resource.data.keys().hasAll(['code', 'uid', 'createdAt']) &&
+                    request.resource.data.keys().hasOnly(['code', 'uid', 'createdAt']) &&
+                    request.resource.data.code == code &&
+                    request.resource.data.uid == request.auth.uid &&
+                    (request.resource.data.createdAt == request.time || request.resource.data.createdAt is number);
+      // Registered referral codes cannot be reassigned, overwritten, or deleted by users
+      allow update, delete: if false;
+    }
+
+    match /referrals/{referredUid} {
+      allow read: if isAuthenticated() && (
+                    referredUid == request.auth.uid ||
+                    resource.data.referredUid == request.auth.uid ||
+                    resource.data.referrerUid == request.auth.uid ||
+                    isAdmin()
+                  );
+      // Enforce 1 referral redemption per referredUid, verified against registered /referral_codes/{code}
+      allow create: if isOwner(referredUid) &&
+                    !exists(/databases/$(database)/documents/referrals/$(referredUid)) &&
+                    isValidReferralRecord(request.resource.data, referredUid) &&
+                    exists(/databases/$(database)/documents/referral_codes/$(request.resource.data.referrerCode)) &&
+                    get(/databases/$(database)/documents/referral_codes/$(request.resource.data.referrerCode)).data.uid == request.resource.data.referrerUid &&
+                    get(/databases/$(database)/documents/referral_codes/$(request.resource.data.referrerCode)).data.uid != request.auth.uid;
+      // Referral records are strictly immutable once created to prevent duplicate rewards
+      allow update, delete: if false;
+    }
+
+    // ===============================================================
+    // 5. Subscriptions Collection (Server/Admin Managed Only)
+    // ===============================================================
+    match /subscriptions/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
       allow write: if isAdmin();
     }
 
-    // user_results collection for backwards compatibility & audit
-    match /user_results/{resultId} {
-      allow read: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid || isAdmin());
-      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
-      allow update, delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
-    }
-
-    // leaderboard collection: public read, authenticated user write
-    match /leaderboard/{entryId} {
-      allow read: if true;
-      allow create, update: if isAuthenticated() &&
-        request.resource.data.userId == request.auth.uid &&
-        request.resource.data.netWpm is number &&
-        request.resource.data.accuracy is number;
-      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
-    }
-
-    // Passages repository
+    // ===============================================================
+    // 6. Content Collections (Passages, Exams, Lessons - Admin Write Only)
+    // ===============================================================
     match /passages/{passageId} {
       allow read: if true;
       allow write: if isAdmin();
     }
 
-    // Exam configurations
     match /exams/{examId} {
       allow read: if true;
       allow write: if isAdmin();
     }
 
-    // Subscriptions collection
-    match /subscriptions/{userId} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow create, update: if isOwner(userId) || isAdmin();
-      allow delete: if isAdmin();
-    }
-
-    // Referrals collection
-    match /referrals/{referralId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated();
-      allow update, delete: if isAdmin();
-    }
-
-    // Connection test path
-    match /test/{docId} {
+    match /learning_lessons/{lessonId} {
       allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

@@ -1,6 +1,43 @@
 import { ExamId, TypingMetrics } from '../types';
 import { EXAMS_DATA } from '../data/exams';
 
+/**
+ * Splits a string into Unicode grapheme clusters (handling Devanagari base characters + matras/halant/nukta)
+ * with graceful fallback if Intl.Segmenter is unavailable.
+ */
+export function splitGraphemes(text: string): string[] {
+  const normalized = (text || '').normalize('NFC');
+  if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
+    const segmenter = new (Intl as any).Segmenter('hi', { granularity: 'grapheme' });
+    return Array.from(segmenter.segment(normalized), (s: any) => s.segment);
+  }
+  return Array.from(normalized);
+}
+
+/**
+ * Official Scoring Formulas Documented per Exam Mode:
+ * - General / Standard Practice: Gross WPM = (Total Characters / 5) / Minutes; Net WPM = max(0, Gross WPM - (Effective Mistake Words / Minutes)); Accuracy = (Correct Characters / Total Characters) * 100.
+ * - SSC CHSL Tier-II: 1,750 Key Depressions (English) / 1,500 Key Depressions (Hindi) in 10 mins; Full & Half Mistake evaluation; max 7% error cutoff.
+ * - SSC CGL DEST: 2,000 Key Depressions in 15 mins (~8,000 KDPH); max 5% error cutoff.
+ * - RRB NTPC: 30 WPM (English) / 25 WPM (Hindi); first 5% mistakes ignored, excess mistakes penalized at 10x words deducted: Net WPM = (Gross Words - (Excess Mistakes * 10)) / Minutes.
+ * - MP CPCT: 30 WPM (English) / 20 WPM (Hindi) with minimum 80% accuracy under MAP_IT evaluation norms.
+ * - Patna High Court / High Court / Supreme Court JCA / BSSC / DSSSB / Delhi Police HCM / UPSSSC: Word-level Full & Half mistake deduction with exam-specific WPM and maximum error percentage cutoffs.
+ */
+export const EXAM_SCORING_DOCUMENTATION: Record<string, string> = {
+  general: 'Standard Net WPM: Gross WPM = (Chars/5)/Min, Net WPM = Gross WPM - (Mistake Words/Min)',
+  'ssc-chsl': 'SSC CHSL Tier-II: Full & Half Mistakes evaluation with 1,750 (Eng) / 1,500 (Hin) KD target',
+  'ssc-cgl-dest': 'SSC CGL DEST: Key Depressions Per Hour (KDPH) benchmark (8,000 KDPH target, <=5% error)',
+  'rrb-ntpc': 'RRB NTPC Official: 5% of total words allowed as free errors; 10x word penalty on excess mistakes',
+  cpct: 'MP CPCT (MAP_IT): Net WPM with >=30 WPM (English) / >=20 WPM (Hindi) and >=80% accuracy',
+  'patna-hc': 'Patna High Court: 1 Error = 1 Word deduction, >=40 WPM (Eng) / >=30 WPM (Hin), >=90% accuracy',
+  'high-court': 'Judicial High Court: 1 Error = 1 Word deduction, >=35 WPM (Eng) / >=30 WPM (Hin), >=90% accuracy',
+  'supreme-court-jca': 'Supreme Court JCA: >=35 WPM English with strict <=3.0% maximum mistake limit',
+  'bssc-bihar': 'Bihar BSSC: >=35 WPM (Eng) / >=30 WPM (Hin) with strict <=2.0% mistake cutoff',
+  dsssb: 'DSSSB LDC/Jr Asst: >=35 WPM (Eng) / >=30 WPM (Hin) with <=5.0% mistake limit',
+  'delhi-police-hcm': 'Delhi Police HCM: >=30 WPM (Eng) / >=25 WPM (Hin) with >=90% accuracy',
+  upsssc: 'UPSSSC Jr Asst: >=30 WPM (Eng) / >=25 WPM (Hin) with >=85% accuracy'
+};
+
 export interface DetailedMistakes {
   fullMistakes: number;
   halfMistakes: number;

@@ -93,6 +93,7 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
   const [typedText, setTypedText] = useState<string>('');
   const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
   const [isActive, setIsActive] = useState<boolean>(false);
+  const [isPaused, setIsPaused] = useState<boolean>(false);
   const [isFinished, setIsFinished] = useState<boolean>(false);
   const [backspaceCount, setBackspaceCount] = useState<number>(0);
   const [keystrokesCount, setKeystrokesCount] = useState<number>(0);
@@ -101,6 +102,8 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const timerRef = useRef<number | null>(null);
   const startTimeRef = useRef<number | null>(null);
+  const accumulatedElapsedRef = useRef<number>(0);
+  const hasSubmittedRef = useRef<boolean>(false);
   const activeWordRef = useRef<HTMLSpanElement | null>(null);
   const referenceContainerRef = useRef<HTMLDivElement | null>(null);
   const dropdownRef = useRef<HTMLDivElement | null>(null);
@@ -112,23 +115,32 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
     setDurationSeconds(initialDuration);
     setKeyboardLayout(initialLayout);
     setSelectedCategory('All');
-    const firstForLang = PASSAGES_DATA.find((p) => p.language === initialLanguage);
+    const customList = StorageService.getCustomPassages().filter((p) => p.language === initialLanguage);
+    const firstForLang = customList[0] || PASSAGES_DATA.find((p) => p.language === initialLanguage);
     if (firstForLang) {
       setSelectedPassageId(firstForLang.id);
     }
   }, [initialExamId, initialLanguage, initialDuration, initialLayout]);
 
-  // Candidate Name
-  const candidateName = user?.name && user.name.trim() !== '' && user.name !== 'Candidate'
-    ? user.name
-    : 'Ritik Sahu';
+  // Candidate Name (never hardcode a personal name for guests)
+  const candidateName =
+    user?.name && user.name.trim() !== '' && user.name !== 'Candidate'
+      ? user.name
+      : 'Guest Aspirant';
 
   // Get Exam Data
   const currentExam = EXAMS_DATA[selectedExamId] || EXAMS_DATA['high-court'] || EXAMS_DATA['cpct'];
 
-  // Filter passages by active language
+  // Filter passages by active language (including any custom passages saved by admin)
   const availablePassages = useMemo(() => {
-    return PASSAGES_DATA.filter((p) => p.language === language);
+    const custom = StorageService.getCustomPassages().filter((p) => p.language === language);
+    const builtin = PASSAGES_DATA.filter((p) => p.language === language);
+    const map = new Map<string, Passage>();
+    custom.forEach((p) => map.set(p.id, p));
+    builtin.forEach((p) => {
+      if (!map.has(p.id)) map.set(p.id, p);
+    });
+    return Array.from(map.values());
   }, [language]);
 
   const availableCategories = useMemo(() => {
@@ -211,12 +223,12 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
   // Compute exact wall-clock elapsed seconds for accurate speed calculation
   const effectiveElapsed = useMemo(() => {
     if (typedText.length === 0) return 0;
-    if (startTimeRef.current) {
-      const wallElapsed = (Date.now() - startTimeRef.current) / 1000;
+    if (startTimeRef.current && !isPaused) {
+      const wallElapsed = accumulatedElapsedRef.current + (Date.now() - startTimeRef.current) / 1000;
       return Math.min(durationSeconds, Math.max(elapsedSeconds, wallElapsed, 1.5));
     }
-    return Math.max(elapsedSeconds, 1.5);
-  }, [typedText.length, elapsedSeconds, durationSeconds]);
+    return Math.max(elapsedSeconds, accumulatedElapsedRef.current, 1.5);
+  }, [typedText.length, elapsedSeconds, durationSeconds, isPaused]);
 
   // Real-time metrics computed via master exam scoring engine
   const liveMetrics = useMemo(() => {
@@ -237,7 +249,7 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
   const netWpm = typedText.length > 0 ? liveMetrics.netWpm : 0;
   const accuracy = typedText.length > 0 ? liveMetrics.accuracy : 100;
 
-  // Remaining time
+  // Remaining time (never negative)
   const remainingSeconds = Math.max(0, durationSeconds - Math.floor(elapsedSeconds));
   const formatTime = (secs: number) => {
     const wholeSecs = Math.max(0, Math.floor(secs));
@@ -264,14 +276,18 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
     } catch {}
   }, [soundEnabled]);
 
-  // Finish test callback
+  // Finish test callback with strict single-submission lock
   const finishTest = useCallback(() => {
+    if (hasSubmittedRef.current) return;
+    hasSubmittedRef.current = true;
+
     if (timerRef.current) clearInterval(timerRef.current);
     setIsActive(false);
+    setIsPaused(false);
     setIsFinished(true);
 
     const finalElapsed = startTimeRef.current
-      ? Math.min(durationSeconds, Math.max(1.5, (Date.now() - startTimeRef.current) / 1000))
+      ? Math.min(durationSeconds, Math.max(1.5, accumulatedElapsedRef.current + (Date.now() - startTimeRef.current) / 1000))
       : Math.max(1.5, elapsedSeconds);
 
     const metrics = calculateTypingMetrics(
@@ -313,15 +329,13 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
     activePassage.id
   ]);
 
-  // High-precision wall-clock timer tick (does NOT depend on finishTest so typing never resets the interval)
+  // High-precision wall-clock timer tick
   useEffect(() => {
-    if (isActive && !isFinished) {
-      if (!startTimeRef.current) {
-        startTimeRef.current = Date.now() - elapsedSeconds * 1000;
-      }
+    if (isActive && !isPaused && !isFinished) {
+      startTimeRef.current = Date.now();
       timerRef.current = window.setInterval(() => {
         if (!startTimeRef.current) return;
-        const nextElapsed = (Date.now() - startTimeRef.current) / 1000;
+        const nextElapsed = accumulatedElapsedRef.current + (Date.now() - startTimeRef.current) / 1000;
         if (nextElapsed >= durationSeconds) {
           setElapsedSeconds(durationSeconds);
           if (timerRef.current) clearInterval(timerRef.current);
@@ -329,26 +343,55 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
           setElapsedSeconds(nextElapsed);
         }
       }, 250);
+    } else {
+      if (timerRef.current) clearInterval(timerRef.current);
     }
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [isActive, isFinished, durationSeconds]);
+  }, [isActive, isPaused, isFinished, durationSeconds]);
 
-  // Trigger test completion when time expires
+  // Trigger test completion when time expires or passage is fully completed
   useEffect(() => {
-    if (isActive && !isFinished && elapsedSeconds >= durationSeconds && durationSeconds > 0) {
-      finishTest();
+    if (isActive && !isFinished) {
+      if (elapsedSeconds >= durationSeconds && durationSeconds > 0) {
+        finishTest();
+      } else if (
+        totalWordsCount > 0 &&
+        typedWords.length >= totalWordsCount &&
+        (typedText.endsWith(' ') || typedWords[totalWordsCount - 1] === targetWords[totalWordsCount - 1])
+      ) {
+        finishTest();
+      }
     }
-  }, [isActive, isFinished, elapsedSeconds, durationSeconds, finishTest]);
+  }, [isActive, isFinished, elapsedSeconds, durationSeconds, totalWordsCount, typedWords, targetWords, typedText, finishTest]);
+
+  // Pause / Resume toggle
+  const handleTogglePause = useCallback(() => {
+    if (!isActive || isFinished) return;
+    if (!isPaused) {
+      if (startTimeRef.current) {
+        accumulatedElapsedRef.current += (Date.now() - startTimeRef.current) / 1000;
+        startTimeRef.current = null;
+      }
+      setIsPaused(true);
+    } else {
+      startTimeRef.current = Date.now();
+      setIsPaused(false);
+      setTimeout(() => inputRef.current?.focus(), 30);
+    }
+  }, [isActive, isFinished, isPaused]);
 
   // Reset Session
   const handleReset = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
     startTimeRef.current = null;
+    accumulatedElapsedRef.current = 0;
+    hasSubmittedRef.current = false;
     setTypedText('');
     setElapsedSeconds(0);
     setIsActive(false);
+    setIsPaused(false);
     setIsFinished(false);
     setBackspaceCount(0);
     setKeystrokesCount(0);
@@ -578,10 +621,6 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
                           key={p.id}
                           type="button"
                           onClick={() => {
-                            if (p.isPro && !isUserPro) {
-                              onOpenSubscriptionModal();
-                              return;
-                            }
                             setSelectedPassageId(p.id);
                             setIsPassageDropdownOpen(false);
                             handleReset();
@@ -658,8 +697,23 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
           </div>
         </div>
 
-        {/* Right Controls: Reset Button & Settings Button */}
+        {/* Right Controls: Pause/Resume, Reset Button & Settings Button */}
         <div className="flex items-center gap-2">
+          {isActive && !isFinished && (
+            <button
+              type="button"
+              onClick={handleTogglePause}
+              className={`px-2.5 py-1.5 rounded-lg border text-xs font-bold transition-colors ${
+                isPaused
+                  ? 'bg-emerald-600 text-white border-emerald-500'
+                  : 'bg-[#242730] hover:bg-[#2f3340] border-[#374151] text-amber-300'
+              }`}
+              title={isPaused ? 'Resume Test' : 'Pause Test'}
+            >
+              {isPaused ? 'Resume' : 'Pause'}
+            </button>
+          )}
+
           {/* Reset / Reload Button */}
           <button
             type="button"
@@ -1153,23 +1207,27 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
         totalWords={totalWordsCount}
       />
 
-      {/* 9. TEST RESULT MODAL */}
+      {/* 9. TEST RESULT MODAL OVERLAY */}
       {activeResult && (
-        <ResultModal
-          result={activeResult}
-          exam={currentExam}
-          onRestart={handleReset}
-          onNextTest={() => {
-            handleReset();
-            // pick next passage
-            const currIdx = availablePassages.findIndex((p) => p.id === selectedPassageId);
-            const nextPass = availablePassages[(currIdx + 1) % availablePassages.length];
-            if (nextPass) {
-              setSelectedPassageId(nextPass.id);
-            }
-          }}
-          onNavigateHome={() => onNavigate('home')}
-        />
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm overflow-y-auto p-4 sm:p-6 flex items-start justify-center">
+          <div className="w-full max-w-4xl my-auto">
+            <ResultModal
+              result={activeResult}
+              exam={currentExam}
+              onRestart={handleReset}
+              onNextTest={() => {
+                handleReset();
+                const currIdx = availablePassages.findIndex((p) => p.id === selectedPassageId);
+                const nextPass = availablePassages[(currIdx + 1) % availablePassages.length];
+                if (nextPass) {
+                  setSelectedPassageId(nextPass.id);
+                }
+              }}
+              onGoToDashboard={() => onNavigate('dashboard')}
+              onNavigateHome={() => onNavigate('home')}
+            />
+          </div>
+        </div>
       )}
     </div>
   );

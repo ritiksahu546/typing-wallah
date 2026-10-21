@@ -16,13 +16,15 @@ try {
 }
 
 // Configuration from generated applet config with optional Vite env override
+const env = (import.meta as { env?: Record<string, string | undefined> }).env || {};
+
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || firebaseAppletConfig.apiKey,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || firebaseAppletConfig.authDomain,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || firebaseAppletConfig.projectId,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || firebaseAppletConfig.storageBucket,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || firebaseAppletConfig.messagingSenderId,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || firebaseAppletConfig.appId,
+  apiKey: env.VITE_FIREBASE_API_KEY || firebaseAppletConfig.apiKey,
+  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || firebaseAppletConfig.authDomain,
+  projectId: env.VITE_FIREBASE_PROJECT_ID || firebaseAppletConfig.projectId,
+  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || firebaseAppletConfig.storageBucket,
+  messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || firebaseAppletConfig.messagingSenderId,
+  appId: env.VITE_FIREBASE_APP_ID || firebaseAppletConfig.appId,
 };
 
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
@@ -31,7 +33,7 @@ export const auth = getAuth(app);
 
 // Initialize Firestore: use custom database ID from config/env with long-polling auto-detection for iframe/proxy resilience
 const databaseId =
-  import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID ||
+  env.VITE_FIREBASE_FIRESTORE_DATABASE_ID ||
   firebaseAppletConfig.firestoreDatabaseId;
 
 let firestoreInstance: Firestore;

@@ -1,10 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { ExamId, TestResultRecord } from '../types';
 import { EXAMS_DATA } from '../data/exams';
+import { StorageService } from '../services/storageService';
 import {
   Trophy,
   CheckCircle2,
-  XCircle,
   RotateCcw,
   BookOpen,
   Share2,
@@ -15,7 +15,7 @@ import {
   Key,
   Printer,
   FileCheck,
-  ShieldCheck
+  TrendingUp
 } from 'lucide-react';
 
 interface ResultModalProps {
@@ -36,8 +36,7 @@ export const ResultModal: React.FC<ResultModalProps> = ({
   onRestart,
   onPracticeMore,
   onNextTest,
-  onGoToDashboard,
-  onNavigateHome
+  onGoToDashboard
 }) => {
   const [copied, setCopied] = useState(false);
   const { metrics, examId, examName, language, durationSeconds, passageTitle } = result;
@@ -45,11 +44,30 @@ export const ResultModal: React.FC<ResultModalProps> = ({
   const exam = passedExam || (examId !== 'general' && EXAMS_DATA[examId as ExamId] ? EXAMS_DATA[examId as ExamId] : null);
   const isQualified = !!metrics.isQualified;
 
+  // Compare with real previous attempt in history (never fabricate if no prior history exists)
+  const previousAttempt = useMemo(() => {
+    const history = StorageService.getTestHistory().filter((r) => r.id !== result.id);
+    if (history.length === 0) return null;
+    const sameLanguage = history.find((r) => r.language === language);
+    return sameLanguage || history[0];
+  }, [result.id, language]);
+
+  const wpmDelta = previousAttempt ? metrics.netWpm - previousAttempt.metrics.netWpm : null;
+  const accDelta = previousAttempt ? Number((metrics.accuracy - previousAttempt.metrics.accuracy).toFixed(1)) : null;
+
+  const formattedDuration = useMemo(() => {
+    const mins = Math.floor(durationSeconds / 60);
+    const secs = durationSeconds % 60;
+    if (mins === 0) return `${secs}s`;
+    if (secs === 0) return `${mins} Min`;
+    return `${mins}m ${secs}s`;
+  }, [durationSeconds]);
+
   const handleRetry = onTryAgain || onRestart || (() => {});
   const handleMore = onPracticeMore || onNextTest || (() => {});
 
   const handleShare = () => {
-    const text = `🎯 I achieved ${metrics.netWpm} Net WPM with ${metrics.accuracy}% accuracy in ${examName} typing test on Typing Wallah! #TypingWallah #GovtExams`;
+    const text = `I achieved ${metrics.netWpm} Net WPM with ${metrics.accuracy}% accuracy in ${examName} typing test on Typing Wallah! #TypingWallah #GovtExams`;
     if (navigator.clipboard) {
       navigator.clipboard.writeText(text);
       setCopied(true);
@@ -64,21 +82,21 @@ export const ResultModal: React.FC<ResultModalProps> = ({
   const grade = metrics.grade || (isQualified ? 'A' : 'Unqualified');
 
   return (
-    <div id="result-dashboard-root" className="w-full max-w-4xl mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-200 print:max-w-none print:shadow-none">
+    <div id="result-dashboard-root" className="w-full max-w-4xl mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-200 print:max-w-none print:shadow-none bg-slate-50 dark:bg-slate-950 p-4 sm:p-6 rounded-2xl border border-slate-200 dark:border-slate-800">
       {/* Result Hero Header */}
       <div className={`rounded-2xl p-5 sm:p-8 text-white shadow-lg ${
         isQualified
-          ? 'bg-gradient-to-r from-emerald-600 via-teal-600 to-blue-700'
-          : 'bg-gradient-to-r from-slate-800 via-slate-900 to-blue-950'
+          ? 'bg-emerald-700'
+          : 'bg-slate-900'
       }`}>
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider bg-white/20 text-white">
+              <span className="px-2.5 py-0.5 rounded-md text-xs font-bold uppercase tracking-wider bg-white/20 text-white">
                 {examName} Evaluation
               </span>
               <span className="text-xs text-white/80 capitalize">
-                {language} • {Math.round(durationSeconds / 60)} Min Test
+                {language} • Duration: {formattedDuration}
               </span>
               {metrics.scoringFormulaName && (
                 <span className="bg-black/20 text-white/90 text-[10px] px-2 py-0.5 rounded-md font-mono">
@@ -184,6 +202,39 @@ export const ResultModal: React.FC<ResultModalProps> = ({
         </div>
       </div>
 
+      {/* Real Comparison with Previous Attempt (Shown ONLY when real history exists) */}
+      {previousAttempt && wpmDelta !== null && accDelta !== null && (
+        <div className="bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800/60 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="flex items-center gap-2.5">
+            <TrendingUp className="w-5 h-5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+            <div>
+              <span className="font-bold text-slate-900 dark:text-white block">
+                Comparison with Your Previous Attempt ({previousAttempt.passageTitle})
+              </span>
+              <span className="text-slate-500 dark:text-slate-400">
+                Previous Score: {previousAttempt.metrics.netWpm} Net WPM at {previousAttempt.metrics.accuracy}% accuracy
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 font-mono font-bold">
+            <span className={`px-2.5 py-1 rounded-lg border ${
+              wpmDelta >= 0
+                ? 'bg-emerald-100/80 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
+                : 'bg-rose-100/80 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border-rose-300 dark:border-rose-800'
+            }`}>
+              Speed: {wpmDelta >= 0 ? `+${wpmDelta}` : wpmDelta} WPM
+            </span>
+            <span className={`px-2.5 py-1 rounded-lg border ${
+              accDelta >= 0
+                ? 'bg-emerald-100/80 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
+                : 'bg-rose-100/80 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border-rose-300 dark:border-rose-800'
+            }`}>
+              Accuracy: {accDelta >= 0 ? `+${accDelta}%` : `${accDelta}%`}
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Official Exam Qualification Note */}
       {metrics.qualificationReason && (
         <div className={`p-4 rounded-2xl border text-xs sm:text-sm font-medium flex items-start space-x-3 ${
@@ -208,25 +259,32 @@ export const ResultModal: React.FC<ResultModalProps> = ({
           <span>Diagnostic Evaluation Breakdown</span>
         </h3>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4 text-sm">
-          <div className="bg-slate-50 dark:bg-slate-800/80 p-3 sm:p-3.5 rounded-xl border border-slate-100 dark:border-slate-700/60">
-            <span className="text-slate-500 dark:text-slate-400 text-xs block">Correct Characters</span>
-            <span className="text-lg sm:text-xl font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">{metrics.correctChars}</span>
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm">
+          <div className="bg-slate-50 dark:bg-slate-800/80 p-3 rounded-xl border border-slate-100 dark:border-slate-700/60">
+            <span className="text-slate-500 dark:text-slate-400 text-xs block">Correct Chars</span>
+            <span className="text-lg font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">{metrics.correctChars}</span>
           </div>
 
-          <div className="bg-slate-50 dark:bg-slate-800/80 p-3 sm:p-3.5 rounded-xl border border-slate-100 dark:border-slate-700/60">
-            <span className="text-slate-500 dark:text-slate-400 text-xs block">Incorrect Characters</span>
-            <span className="text-lg sm:text-xl font-bold text-rose-600 dark:text-rose-400 tabular-nums">{metrics.incorrectChars}</span>
+          <div className="bg-slate-50 dark:bg-slate-800/80 p-3 rounded-xl border border-slate-100 dark:border-slate-700/60">
+            <span className="text-slate-500 dark:text-slate-400 text-xs block">Incorrect Chars</span>
+            <span className="text-lg font-bold text-rose-600 dark:text-rose-400 tabular-nums">{metrics.incorrectChars}</span>
           </div>
 
-          <div className="bg-slate-50 dark:bg-slate-800/80 p-3 sm:p-3.5 rounded-xl border border-slate-100 dark:border-slate-700/60">
-            <span className="text-slate-500 dark:text-slate-400 text-xs block">Total Keystrokes</span>
-            <span className="text-lg sm:text-xl font-bold text-slate-800 dark:text-slate-100 tabular-nums">{metrics.totalChars}</span>
+          <div className="bg-slate-50 dark:bg-slate-800/80 p-3 rounded-xl border border-slate-100 dark:border-slate-700/60">
+            <span className="text-slate-500 dark:text-slate-400 text-xs block">Errors (Mistakes)</span>
+            <span className="text-lg font-bold text-rose-600 dark:text-rose-400 tabular-nums">
+              {(metrics as any).mistakesDetail?.totalMistakes ?? metrics.errors}
+            </span>
           </div>
 
-          <div className="bg-slate-50 dark:bg-slate-800/80 p-3 sm:p-3.5 rounded-xl border border-slate-100 dark:border-slate-700/60">
-            <span className="text-slate-500 dark:text-slate-400 text-xs block">Backspaces Used</span>
-            <span className="text-lg sm:text-xl font-bold text-slate-800 dark:text-slate-100 tabular-nums">{metrics.backspaceCount}</span>
+          <div className="bg-slate-50 dark:bg-slate-800/80 p-3 rounded-xl border border-slate-100 dark:border-slate-700/60">
+            <span className="text-slate-500 dark:text-slate-400 text-xs block">Backspaces</span>
+            <span className="text-lg font-bold text-slate-800 dark:text-slate-100 tabular-nums">{metrics.backspaceCount}</span>
+          </div>
+
+          <div className="bg-slate-50 dark:bg-slate-800/80 p-3 rounded-xl border border-slate-100 dark:border-slate-700/60">
+            <span className="text-slate-500 dark:text-slate-400 text-xs block">Test Duration</span>
+            <span className="text-lg font-bold text-slate-800 dark:text-slate-100 tabular-nums">{formattedDuration}</span>
           </div>
         </div>
 

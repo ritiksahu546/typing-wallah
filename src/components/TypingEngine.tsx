@@ -159,8 +159,12 @@ export const TypingEngine: React.FC<TypingEngineProps> = ({
     }
   }, [soundEnabled]);
 
-  // Handle test completion
+  // Handle test completion with single-submission guard
+  const hasSubmittedRef = useRef<boolean>(false);
+
   const finishTest = useCallback(() => {
+    if (hasSubmittedRef.current) return;
+    hasSubmittedRef.current = true;
     if (timerRef.current) clearInterval(timerRef.current);
     setIsActive(false);
     setIsFinished(true);
@@ -332,6 +336,7 @@ export const TypingEngine: React.FC<TypingEngineProps> = ({
 
   const handleRestart = () => {
     if (timerRef.current) clearInterval(timerRef.current);
+    hasSubmittedRef.current = false;
     setTypedText('');
     setElapsedSeconds(0);
     setIsActive(false);

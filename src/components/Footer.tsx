@@ -1,6 +1,6 @@
 import React from 'react';
 import { ActivePage, ExamId } from '../types';
-import { Keyboard, ShieldAlert, Heart, ExternalLink, Award } from 'lucide-react';
+import { Keyboard, ShieldAlert, Award } from 'lucide-react';
 import { EXAMS_DATA } from '../data/exams';
 
 interface FooterProps {
@@ -23,11 +23,11 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
               </span>
             </div>
             <p className="text-sm text-slate-400 leading-relaxed max-w-sm">
-              India's premier independent typing practice simulator tailored specifically for competitive government exams. Realistic interface, exact timing algorithms, and dual Remington GAIL & InScript Hindi support.
+              India's dedicated online typing practice platform built for competitive government exam aspirants. Realistic exam interfaces, accurate WPM & penalty scoring, and dual Remington GAIL & InScript Hindi support.
             </p>
             <div className="flex items-center space-x-2 text-xs text-amber-400 bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/60 max-w-sm">
               <Award className="w-4 h-4 shrink-0 text-amber-400" />
-              <span>Tagline: Practice. Improve. Type Faster.</span>
+              <span>Practice Smart. Type Fast. Crack Your Exam.</span>
             </div>
           </div>
 
@@ -59,15 +59,35 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
                   </button>
                 </li>
               ))}
+              <li>
+                <button
+                  id="footer-all-exams"
+                  type="button"
+                  onClick={() => onNavigate('exams')}
+                  className="hover:text-blue-400 transition-colors text-left font-semibold text-blue-400"
+                >
+                  All 8 Exam Simulators →
+                </button>
+              </li>
             </ul>
           </div>
 
           {/* Typing Practice */}
           <div>
             <h4 className="text-white font-bold text-sm uppercase tracking-wider mb-3">
-              Typing Modalities
+              Typing Practice
             </h4>
             <ul className="space-y-2 text-xs">
+              <li>
+                <button
+                  id="footer-nav-touch-typing"
+                  type="button"
+                  onClick={() => onNavigate('touch-typing')}
+                  className="hover:text-blue-400 transition-colors text-left"
+                >
+                  Learn Touch Typing Course
+                </button>
+              </li>
               <li>
                 <button
                   id="footer-nav-hindi"
@@ -75,17 +95,7 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
                   onClick={() => onNavigate('hindi-typing')}
                   className="hover:text-blue-400 transition-colors text-left"
                 >
-                  Hindi InScript Typing
-                </button>
-              </li>
-              <li>
-                <button
-                  id="footer-nav-remington"
-                  type="button"
-                  onClick={() => onNavigate('hindi-typing')}
-                  className="hover:text-blue-400 transition-colors text-left"
-                >
-                  Hindi Remington GAIL
+                  Hindi InScript & Remington GAIL
                 </button>
               </li>
               <li>
@@ -131,22 +141,12 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
             </ul>
           </div>
 
-          {/* Resources & Admin */}
+          {/* Platform & Legal */}
           <div>
             <h4 className="text-white font-bold text-sm uppercase tracking-wider mb-3">
-              Resources & Tools
+              Platform & Legal
             </h4>
             <ul className="space-y-2 text-xs">
-              <li>
-                <button
-                  id="footer-nav-blog"
-                  type="button"
-                  onClick={() => onNavigate('blog')}
-                  className="hover:text-blue-400 transition-colors text-left"
-                >
-                  Preparation Blog & Tips
-                </button>
-              </li>
               <li>
                 <button
                   id="footer-nav-dashboard"
@@ -159,29 +159,59 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
               </li>
               <li>
                 <button
-                  id="footer-nav-admin"
+                  id="footer-nav-pricing"
                   type="button"
-                  onClick={() => onNavigate('admin')}
-                  className="hover:text-blue-400 transition-colors text-left text-slate-400"
+                  onClick={() => onNavigate('pricing')}
+                  className="hover:text-blue-400 transition-colors text-left"
                 >
-                  Admin Architecture Preview
+                  Pricing & Plans
                 </button>
               </li>
               <li>
                 <button
-                  id="footer-nav-seo"
+                  id="footer-nav-referrals"
                   type="button"
-                  onClick={() => onNavigate('seo-page')}
-                  className="hover:text-blue-400 transition-colors text-left text-slate-400"
+                  onClick={() => onNavigate('referrals')}
+                  className="hover:text-blue-400 transition-colors text-left"
                 >
-                  Exam Landing Guides
+                  Invite & Referrals
+                </button>
+              </li>
+              <li>
+                <button
+                  id="footer-nav-blog"
+                  type="button"
+                  onClick={() => onNavigate('blog')}
+                  className="hover:text-blue-400 transition-colors text-left"
+                >
+                  Preparation Blog & Guides
+                </button>
+              </li>
+              <li>
+                <button
+                  id="footer-nav-about"
+                  type="button"
+                  onClick={() => onNavigate('about')}
+                  className="hover:text-blue-400 transition-colors text-left"
+                >
+                  About Us
+                </button>
+              </li>
+              <li>
+                <button
+                  id="footer-nav-contact"
+                  type="button"
+                  onClick={() => onNavigate('contact')}
+                  className="hover:text-blue-400 transition-colors text-left"
+                >
+                  Contact Support
                 </button>
               </li>
             </ul>
           </div>
         </div>
 
-        {/* Mandatory Independent Disclaimer (Phase 17 Trust) */}
+        {/* Mandatory Independent Disclaimer */}
         <div className="my-6 p-4 rounded-xl bg-slate-800/60 border border-slate-700/80 text-xs text-slate-400 flex items-start space-x-3">
           <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
           <div className="space-y-1">
@@ -197,13 +227,33 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
           </div>
         </div>
 
-        {/* Bottom Bar */}
+        {/* Bottom Bar with Legal Links */}
         <div className="pt-4 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-3">
-          <p>© 2026 Typing Wallah. Built with precision for Indian Competitive Aspirants.</p>
-          <div className="flex items-center space-x-4">
-            <span className="text-slate-400">Loop 01 Production Foundation</span>
+          <p>© {new Date().getFullYear()} Typing Wallah. Practice Smart. Type Fast. Crack Your Exam.</p>
+          <div className="flex flex-wrap items-center gap-4">
+            <button
+              type="button"
+              onClick={() => onNavigate('privacy')}
+              className="hover:text-slate-300 transition-colors"
+            >
+              Privacy Policy
+            </button>
             <span>•</span>
-            <span className="text-emerald-400 font-medium">100% Client-Side Ready</span>
+            <button
+              type="button"
+              onClick={() => onNavigate('terms')}
+              className="hover:text-slate-300 transition-colors"
+            >
+              Terms & Conditions
+            </button>
+            <span>•</span>
+            <button
+              type="button"
+              onClick={() => onNavigate('disclaimer')}
+              className="hover:text-slate-300 transition-colors"
+            >
+              Legal Disclaimer
+            </button>
           </div>
         </div>
       </div>

@@ -98,28 +98,23 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
   // Check if this lesson is unlocked
   const isLessonUnlocked = lesson.lessonNumber <= progress.highestUnlockedLessonNumber;
 
-  // Player mode tabs: 'intro' | 'practice' | 'test'
-  const [activeTab, setActiveTab] = useState<'intro' | 'practice' | 'test'>(
-    lesson.mode === 'test' ? 'test' : 'intro'
+  // Player mode tabs: 'practice' | 'test'
+  const [activeTab, setActiveTab] = useState<'practice' | 'test'>(
+    lesson.mode === 'test' ? 'test' : 'practice'
   );
 
   const [soundEnabled, setSoundEnabled] = useState(true);
 
   // Sequences setup
-  const introSequence = useMemo(() => {
-    return (lesson.introductionText || lesson.practiceText || 'f j f j').split('');
-  }, [lesson]);
-
   const practiceSequence = useMemo(() => {
-    return (lesson.practiceText || 'fj fj jf jf fff jjj').split('');
+    return (lesson.practiceText || lesson.introductionText || 'fj fj jf jf fff jjj').split('');
   }, [lesson]);
 
   const testText = useMemo(() => {
     return lesson.testText || lesson.practiceText || 'fff jjj fff jjj';
   }, [lesson]);
 
-  // Stage state for intro and practice
-  const [introIdx, setIntroIdx] = useState(0);
+  // Stage state for practice
   const [practiceIdx, setPracticeIdx] = useState(0);
   const [mistakeShake, setMistakeShake] = useState(false);
 
@@ -144,7 +139,6 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
 
   // Reset states when lesson changes
   useEffect(() => {
-    setIntroIdx(0);
     setPracticeIdx(0);
     setTestInput('');
     setTestStartTime(null);
@@ -155,7 +149,7 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
     setTestWpm(0);
     setTestAccuracy(100);
     setShowResultModal(false);
-    setActiveTab(lesson.mode === 'test' ? 'test' : 'intro');
+    setActiveTab(lesson.mode === 'test' ? 'test' : 'practice');
   }, [lesson.id]);
 
   // Keep input focused without scrolling the page
@@ -171,14 +165,13 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
     focusInput();
   }, [activeTab, lesson.id, focusInput]);
 
-  // Process a single typed character in Introduction & Practice modes
+  // Process a single typed character in Practice mode
   const processStageChar = useCallback(
     (typedChar: string) => {
       if (!isLessonUnlocked || showResultModal) return;
 
-      const currentSequence = activeTab === 'intro' ? introSequence : practiceSequence;
-      const currentIdx = activeTab === 'intro' ? introIdx : practiceIdx;
-      const setIdx = activeTab === 'intro' ? setIntroIdx : setPracticeIdx;
+      const currentSequence = practiceSequence;
+      const currentIdx = practiceIdx;
 
       const targetChar = currentSequence[currentIdx];
       if (!targetChar) return;
@@ -191,20 +184,13 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
       if (isMatch) {
         playTone('key', soundEnabled);
         const nextIdx = currentIdx + 1;
-        setIdx(nextIdx);
+        setPracticeIdx(nextIdx);
 
         if (nextIdx >= currentSequence.length) {
           playTone('success', soundEnabled);
-          if (activeTab === 'intro') {
-            setTimeout(() => {
-              setActiveTab('practice');
-              setPracticeIdx(0);
-            }, 250);
-          } else if (activeTab === 'practice') {
-            setTimeout(() => {
-              setActiveTab('test');
-            }, 250);
-          }
+          setTimeout(() => {
+            setActiveTab('test');
+          }, 250);
         }
       } else {
         playTone('error', soundEnabled);
@@ -215,10 +201,7 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
     [
       isLessonUnlocked,
       showResultModal,
-      activeTab,
-      introSequence,
       practiceSequence,
-      introIdx,
       practiceIdx,
       soundEnabled
     ]
@@ -475,21 +458,6 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
           <button
             type="button"
             onClick={() => {
-              setActiveTab('intro');
-              setIntroIdx(0);
-            }}
-            className={`px-3 py-1.5 rounded-lg font-bold text-xs transition-colors cursor-pointer whitespace-nowrap ${
-              activeTab === 'intro'
-                ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-white shadow-xs'
-                : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-            }`}
-          >
-            1. Key Intro
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
               setActiveTab('practice');
               setPracticeIdx(0);
             }}
@@ -499,7 +467,7 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
                 : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
             }`}
           >
-            2. Practice Drills
+            Practice Drills
           </button>
 
           <button
@@ -512,7 +480,7 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
             }`}
           >
             <Target className="w-3.5 h-3.5" />
-            <span>3. Benchmark Test</span>
+            <span>Benchmark Test</span>
           </button>
         </div>
 
@@ -521,16 +489,6 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
           <span className="hidden sm:inline text-slate-500 dark:text-slate-400">
             Goal: <strong className="font-mono text-slate-800 dark:text-slate-200">{lesson.targetWpm} WPM · {lesson.minAccuracy}%</strong>
           </span>
-
-          {activeTab === 'intro' && (
-            <button
-              type="button"
-              onClick={() => setActiveTab('practice')}
-              className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs transition-colors cursor-pointer whitespace-nowrap"
-            >
-              Skip to Drills →
-            </button>
-          )}
 
           {activeTab === 'practice' && (
             <>
@@ -564,16 +522,6 @@ export const CourseLessonPlayer: React.FC<CourseLessonPlayerProps> = ({
       </div>
 
       {/* Main Interactive Stage */}
-      {activeTab === 'intro' && (
-        <TouchTypingVisualStage
-          currentKey={introSequence[introIdx] || ' '}
-          sequence={introSequence}
-          currentIndex={introIdx}
-          mode="introduction"
-          mistakeTrigger={mistakeShake}
-        />
-      )}
-
       {activeTab === 'practice' && (
         <TouchTypingVisualStage
           currentKey={practiceSequence[practiceIdx] || ' '}

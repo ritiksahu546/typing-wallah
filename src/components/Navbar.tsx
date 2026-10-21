@@ -263,6 +263,32 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               Leaderboard
             </button>
+
+            <button
+              id="nav-pricing"
+              type="button"
+              onClick={() => handleNav('pricing')}
+              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                activePage === 'pricing'
+                  ? 'text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400'
+                  : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+              }`}
+            >
+              Pricing
+            </button>
+
+            <button
+              id="nav-blog"
+              type="button"
+              onClick={() => handleNav('blog')}
+              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                activePage === 'blog' || activePage === 'blog-post'
+                  ? 'text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400'
+                  : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+              }`}
+            >
+              Guides
+            </button>
           </nav>
 
           {/* Zone 3: Actions & Account */}
@@ -321,6 +347,13 @@ export const Navbar: React.FC<NavbarProps> = ({
                       className="w-full text-left px-4 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-blue-50 dark:hover:bg-blue-900/30 hover:text-blue-600"
                     >
                       Leaderboard Standing
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleNav('referrals')}
+                      className="w-full text-left px-4 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-blue-50 dark:hover:bg-blue-900/30 hover:text-blue-600"
+                    >
+                      Invite & Referrals
                     </button>
                     <div className="border-t border-slate-100 dark:border-slate-700 my-1"></div>
                     <button
@@ -461,6 +494,30 @@ export const Navbar: React.FC<NavbarProps> = ({
             Leaderboard
           </button>
           <button
+            id="mobile-nav-pricing"
+            type="button"
+            onClick={() => handleNav('pricing')}
+            className="w-full text-left px-3 py-2 rounded-lg text-sm font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+          >
+            Pricing & Plans
+          </button>
+          <button
+            id="mobile-nav-blog"
+            type="button"
+            onClick={() => handleNav('blog')}
+            className="w-full text-left px-3 py-2 rounded-lg text-sm font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+          >
+            Typing Guides & Blog
+          </button>
+          <button
+            id="mobile-nav-referrals"
+            type="button"
+            onClick={() => handleNav('referrals')}
+            className="w-full text-left px-3 py-2 rounded-lg text-sm font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+          >
+            Invite & Referrals
+          </button>
+          <button
             id="mobile-nav-dashboard"
             type="button"
             onClick={() => handleNav('dashboard')}
@@ -499,14 +556,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                 className="text-xs font-bold text-slate-600 dark:text-slate-300"
               >
                 {user.isLoggedIn ? 'Account Dashboard' : 'Email Login / Sign Up'}
-              </button>
-              <button
-                id="mobile-admin-btn"
-                type="button"
-                onClick={() => handleNav('admin')}
-                className="text-xs text-slate-400 dark:text-slate-500 hover:text-slate-600"
-              >
-                Admin Config
               </button>
             </div>
           </div>
