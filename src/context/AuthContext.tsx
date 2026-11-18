@@ -80,31 +80,53 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   /**
    * Verify admin status strictly via trusted server-side mechanisms:
-   * 1. Firebase ID Token custom claims (claims.admin === true || claims.role === 'admin')
-   * 2. Server-managed /admins/{uid} collection (client write-denied in firestore.rules)
-   * Client-writable users/{uid}.role and unverified emails are NEVER trusted.
+   * 1. Requires a verified email address (fbUser.emailVerified === true).
+   * 2. Checks server-managed /admins/{uid} collection first: if `revoked === true` or `active === false`,
+   *    immediately denies admin access even if a cached ID token still holds a custom claim.
+   * 3. Force-refreshes Firebase ID token (`getIdTokenResult(true)`, falling back to cached token only if offline)
+   *    so custom claim additions or revocations take effect immediately.
+   * Client-writable users/{uid}.role is NEVER trusted.
    */
   const verifyTrustedAdminAccess = async (fbUser: User): Promise<boolean> => {
-    try {
-      const tokenResult = await fbUser.getIdTokenResult();
-      if (tokenResult.claims.admin === true || tokenResult.claims.role === 'admin') {
-        return true;
-      }
-    } catch {
-      // Continue to /admins/{uid} check
+    if (!fbUser || !fbUser.emailVerified) {
+      return false;
     }
 
+    let hasActiveAdminDoc = false;
     try {
       const adminDocRef = doc(db, 'admins', fbUser.uid);
       const adminSnap = await withFirestoreTimeout(getDoc(adminDocRef), 2500);
-      if (adminSnap.exists() && adminSnap.data()?.revoked !== true) {
-        return true;
+      if (adminSnap.exists()) {
+        const adminData = adminSnap.data();
+        if (adminData?.revoked === true || adminData?.active === false) {
+          return false;
+        }
+        hasActiveAdminDoc = true;
       }
     } catch {
       // No admin document or offline
     }
 
-    return false;
+    try {
+      let tokenResult;
+      try {
+        // Force token refresh to pick up recent custom claim assignments or revocations
+        tokenResult = await fbUser.getIdTokenResult(true);
+      } catch {
+        tokenResult = await fbUser.getIdTokenResult(false);
+      }
+
+      if (tokenResult.claims.revoked === true) {
+        return false;
+      }
+      if (tokenResult.claims.admin === true || tokenResult.claims.role === 'admin') {
+        return true;
+      }
+    } catch {
+      // Ignore token inspection failure and rely on hasActiveAdminDoc
+    }
+
+    return hasActiveAdminDoc;
   };
 
   // Sync user profile with Firestore users collection
@@ -259,18 +281,22 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const myReferralCode = await StorageService.registerUserReferralCode(cred.user.uid);
     try {
       await withFirestoreTimeout(
-        setDoc(doc(db, 'users', cred.user.uid), {
-          uid: cred.user.uid,
-          email: cred.user.email,
-          displayName: cleanName,
-          targetExam,
-          referralCode: myReferralCode,
-          joinedDate: new Date().toLocaleDateString('en-IN', {
-            month: 'short',
-            year: 'numeric'
-          }),
-          createdAt: serverTimestamp()
-        }),
+        setDoc(
+          doc(db, 'users', cred.user.uid),
+          {
+            uid: cred.user.uid,
+            email: cred.user.email,
+            displayName: cleanName,
+            targetExam,
+            referralCode: myReferralCode,
+            joinedDate: new Date().toLocaleDateString('en-IN', {
+              month: 'short',
+              year: 'numeric'
+            }),
+            createdAt: serverTimestamp()
+          },
+          { merge: true }
+        ),
         2500
       );
     } catch {
@@ -336,7 +362,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         await withFirestoreTimeout(
           setDoc(
             doc(db, 'users', currentUser.uid),
-            { targetExam: examId, updatedAt: serverTimestamp() },
+            { uid: currentUser.uid, targetExam: examId, updatedAt: serverTimestamp() },
             { merge: true }
           ),
           2500

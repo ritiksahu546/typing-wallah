@@ -44,13 +44,76 @@ const DEFAULT_PROGRESS: UserCourseProgress = {
   lastUpdated: Date.now()
 };
 
+export function sanitizeCourseProgressPayload(
+  progress: Partial<UserCourseProgress>,
+  uid: string
+): UserCourseProgress {
+  return {
+    userId: uid,
+    currentLessonNumber: Math.max(1, Math.min(500, Math.round(Number(progress.currentLessonNumber) || 1))),
+    highestUnlockedLessonNumber: Math.max(
+      1,
+      Math.min(500, Math.round(Number(progress.highestUnlockedLessonNumber) || 1))
+    ),
+    completedLessonIds: Array.isArray(progress.completedLessonIds)
+      ? progress.completedLessonIds.slice(0, 500).map(String)
+      : [],
+    bestWpm: Math.max(0, Math.min(300, Math.round(Number(progress.bestWpm) || 0))),
+    avgWpm: Math.max(0, Math.min(300, Math.round(Number(progress.avgWpm) || 0))),
+    avgAccuracy: Math.max(0, Math.min(100, Math.round(Number(progress.avgAccuracy ?? 100)))),
+    totalAttempts: Math.max(0, Math.min(1000000, Math.floor(Number(progress.totalAttempts) || 0))),
+    passedAttempts: Math.max(0, Math.min(1000000, Math.floor(Number(progress.passedAttempts) || 0))),
+    currentStreak: Math.max(0, Math.min(100000, Math.floor(Number(progress.currentStreak) || 1))),
+    lastActiveDate: String(progress.lastActiveDate || new Date().toISOString().split('T')[0]).slice(0, 30),
+    todayWordsTyped: Math.max(0, Math.min(1000000, Math.floor(Number(progress.todayWordsTyped) || 0))),
+    todayPracticeTimeSeconds: Math.max(
+      0,
+      Math.min(864000, Math.floor(Number(progress.todayPracticeTimeSeconds) || 0))
+    ),
+    lastUpdated:
+      typeof progress.lastUpdated === 'number' && progress.lastUpdated > 0
+        ? Math.floor(progress.lastUpdated)
+        : Date.now()
+  };
+}
+
+export function sanitizeLessonAttemptPayload(
+  attempt: LessonAttemptResult,
+  uid: string,
+  createdAtValue: unknown = serverTimestamp()
+): Record<string, any> {
+  return {
+    id: String(attempt.id || `attempt_${Date.now()}`).slice(0, 120),
+    lessonId: String(attempt.lessonId || 'lesson-1').slice(0, 80),
+    lessonNumber: Math.max(1, Math.min(500, Math.round(Number(attempt.lessonNumber) || 1))),
+    lessonName: String(attempt.lessonName || 'Lesson').slice(0, 160),
+    userId: uid,
+    timestamp:
+      typeof attempt.timestamp === 'number' &&
+      attempt.timestamp >= 1000000000000 &&
+      attempt.timestamp <= 9999999999999
+        ? Math.floor(attempt.timestamp)
+        : Date.now(),
+    date: String(attempt.date || new Date().toISOString().split('T')[0]).slice(0, 30),
+    grossWpm: Math.max(0, Math.min(300, Math.round(Number(attempt.grossWpm) || 0))),
+    netWpm: Math.max(0, Math.min(300, Math.round(Number(attempt.netWpm) || 0))),
+    accuracy: Math.max(0, Math.min(100, Math.round(Number(attempt.accuracy) || 0))),
+    errors: Math.max(0, Math.min(50000, Math.floor(Number(attempt.errors) || 0))),
+    backspaces: Math.max(0, Math.min(50000, Math.floor(Number(attempt.backspaces) || 0))),
+    durationSeconds: Math.max(1, Math.min(7200, Math.round(Number(attempt.durationSeconds) || 1))),
+    passed: Boolean(attempt.passed),
+    attemptNumber: Math.max(1, Math.min(1000000, Math.floor(Number(attempt.attemptNumber) || 1))),
+    createdAt: createdAtValue
+  };
+}
+
 export const LearningProgressService = {
   /**
    * Retrieves course progress for the current user.
    * Checks Firestore first if logged in, with seamless offline LocalStorage cache fallback.
    */
   async getUserCourseProgress(userId?: string): Promise<UserCourseProgress> {
-    const uid = userId || auth.currentUser?.uid || 'guest';
+    const uid = auth.currentUser?.uid || userId || 'guest';
     const localKey = `${STORAGE_KEYS.PROGRESS_PREFIX}${uid}`;
 
     // Read local cache first for instant responsiveness
@@ -58,46 +121,50 @@ export const LearningProgressService = {
     try {
       const cached = localStorage.getItem(localKey);
       if (cached) {
-        localProgress = JSON.parse(cached);
+        localProgress = sanitizeCourseProgressPayload(JSON.parse(cached), uid);
       }
     } catch {
       // Ignore JSON parse errors
     }
 
     // If authenticated, sync with Firestore to support cross-device persistence (Website, Android, Windows)
-    if (auth.currentUser && uid !== 'guest') {
+    if (auth.currentUser && uid === auth.currentUser.uid) {
       try {
         const progressDocRef = doc(db, 'users', uid, 'learning_progress', 'course');
         const snap = await withFirestoreTimeout(getDoc(progressDocRef), 2500);
         if (snap.exists()) {
           const remoteData = snap.data() as Partial<UserCourseProgress>;
           // Merge remote with highest unlocked guarantee
-          const merged: UserCourseProgress = {
-            ...localProgress,
-            ...remoteData,
-            userId: uid,
-            highestUnlockedLessonNumber: Math.max(
-              localProgress.highestUnlockedLessonNumber || 1,
-              remoteData.highestUnlockedLessonNumber || 1
-            ),
-            completedLessonIds: Array.from(
-              new Set([
-                ...(localProgress.completedLessonIds || []),
-                ...(remoteData.completedLessonIds || [])
-              ])
-            )
-          };
+          const merged = sanitizeCourseProgressPayload(
+            {
+              ...localProgress,
+              ...remoteData,
+              userId: uid,
+              highestUnlockedLessonNumber: Math.max(
+                localProgress.highestUnlockedLessonNumber || 1,
+                remoteData.highestUnlockedLessonNumber || 1
+              ),
+              completedLessonIds: Array.from(
+                new Set([
+                  ...(localProgress.completedLessonIds || []),
+                  ...(remoteData.completedLessonIds || [])
+                ])
+              )
+            },
+            uid
+          );
           localStorage.setItem(localKey, JSON.stringify(merged));
           return merged;
         } else {
-          // Initialize remote document
-          await withFirestoreTimeout(
-            setDoc(progressDocRef, {
+          // Initialize remote document with strictly validated schema
+          const initialPayload = sanitizeCourseProgressPayload(
+            {
               ...localProgress,
               lastUpdated: Date.now()
-            }),
-            2500
+            },
+            uid
           );
+          await withFirestoreTimeout(setDoc(progressDocRef, initialPayload), 2500);
         }
       } catch {
         // Offline cache used seamlessly
@@ -127,16 +194,25 @@ export const LearningProgressService = {
     const uid = auth.currentUser?.uid || attempt.userId || 'guest';
     const currentProgress = await this.getUserCourseProgress(uid);
 
+    const safeGrossWpm = Math.max(0, Math.min(300, Math.round(Number(attempt.grossWpm) || 0)));
+    const safeNetWpm = Math.max(0, Math.min(safeGrossWpm, Math.round(Number(attempt.netWpm) || 0)));
+    const safeAccuracy = Math.max(0, Math.min(100, Math.round(Number(attempt.accuracy) || 0)));
+    const safeDuration = Math.max(1, Math.min(7200, Math.round(Number(attempt.durationSeconds) || 1)));
+
     // Rule validation: Did candidate meet BOTH Target WPM AND Min Accuracy?
-    const passed =
-      attempt.netWpm >= lesson.targetWpm && attempt.accuracy >= lesson.minAccuracy;
+    const passed = safeNetWpm >= lesson.targetWpm && safeAccuracy >= lesson.minAccuracy;
 
     const fullAttempt: LessonAttemptResult = {
       date: new Date().toISOString().split('T')[0],
       lessonName: lesson.name,
       attemptNumber: (currentProgress.totalAttempts || 0) + 1,
       ...attempt,
-      id: `attempt_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+      userId: uid,
+      grossWpm: safeGrossWpm,
+      netWpm: safeNetWpm,
+      accuracy: safeAccuracy,
+      durationSeconds: safeDuration,
+      id: `attempt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       passed,
       timestamp: Date.now()
     };
@@ -174,31 +250,37 @@ export const LearningProgressService = {
     // Recalculate stats
     const totalAttempts = currentProgress.totalAttempts + 1;
     const passedAttempts = currentProgress.passedAttempts + (passed ? 1 : 0);
-    const bestWpm = Math.max(currentProgress.bestWpm, attempt.netWpm);
+    const bestWpm = Math.max(currentProgress.bestWpm, safeNetWpm);
     const avgWpm = Math.round(
-      (currentProgress.avgWpm * currentProgress.totalAttempts + attempt.netWpm) / totalAttempts
+      (currentProgress.avgWpm * currentProgress.totalAttempts + safeNetWpm) / totalAttempts
     );
     const avgAccuracy = Math.round(
-      (currentProgress.avgAccuracy * currentProgress.totalAttempts + attempt.accuracy) / totalAttempts
+      (currentProgress.avgAccuracy * currentProgress.totalAttempts + safeAccuracy) / totalAttempts
     );
 
-    const updatedProgress: UserCourseProgress = {
-      ...currentProgress,
-      userId: uid,
-      highestUnlockedLessonNumber: newHighestUnlocked,
-      currentLessonNumber: passed ? Math.min(newHighestUnlocked, 92) : lesson.lessonNumber,
-      completedLessonIds: Array.from(completedSet),
-      bestWpm,
-      avgWpm,
-      avgAccuracy,
-      totalAttempts,
-      passedAttempts,
-      currentStreak,
-      lastActiveDate: todayStr,
-      todayWordsTyped: (isNewDay ? 0 : currentProgress.todayWordsTyped) + Math.round((attempt.durationSeconds * attempt.grossWpm) / 60),
-      todayPracticeTimeSeconds: (isNewDay ? 0 : currentProgress.todayPracticeTimeSeconds) + attempt.durationSeconds,
-      lastUpdated: Date.now()
-    };
+    const updatedProgress = sanitizeCourseProgressPayload(
+      {
+        ...currentProgress,
+        userId: uid,
+        highestUnlockedLessonNumber: newHighestUnlocked,
+        currentLessonNumber: passed ? Math.min(newHighestUnlocked, 92) : lesson.lessonNumber,
+        completedLessonIds: Array.from(completedSet),
+        bestWpm,
+        avgWpm,
+        avgAccuracy,
+        totalAttempts,
+        passedAttempts,
+        currentStreak,
+        lastActiveDate: todayStr,
+        todayWordsTyped:
+          (isNewDay ? 0 : currentProgress.todayWordsTyped) +
+          Math.round((safeDuration * safeGrossWpm) / 60),
+        todayPracticeTimeSeconds:
+          (isNewDay ? 0 : currentProgress.todayPracticeTimeSeconds) + safeDuration,
+        lastUpdated: Date.now()
+      },
+      uid
+    );
 
     // Save to LocalStorage
     const localKey = `${STORAGE_KEYS.PROGRESS_PREFIX}${uid}`;
@@ -209,19 +291,14 @@ export const LearningProgressService = {
     }
 
     // Save to Firestore if user is authenticated
-    if (auth.currentUser && uid !== 'guest') {
+    if (auth.currentUser && uid === auth.currentUser.uid) {
       try {
         const progressDocRef = doc(db, 'users', uid, 'learning_progress', 'course');
         await withFirestoreTimeout(setDoc(progressDocRef, updatedProgress, { merge: true }), 2500);
 
         const resultsColRef = collection(db, 'users', uid, 'learning_results');
-        await withFirestoreTimeout(
-          addDoc(resultsColRef, {
-            ...fullAttempt,
-            createdAt: serverTimestamp()
-          }),
-          2500
-        );
+        const attemptPayload = sanitizeLessonAttemptPayload(fullAttempt, uid, serverTimestamp());
+        await withFirestoreTimeout(addDoc(resultsColRef, attemptPayload), 2500);
       } catch {
         // Offline cache retained seamlessly
       }

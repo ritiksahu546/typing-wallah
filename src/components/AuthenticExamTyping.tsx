@@ -286,15 +286,17 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
     setIsPaused(false);
     setIsFinished(true);
 
-    const finalElapsed = startTimeRef.current
-      ? Math.min(durationSeconds, Math.max(1.5, accumulatedElapsedRef.current + (Date.now() - startTimeRef.current) / 1000))
-      : Math.max(1.5, elapsedSeconds);
+    const rawElapsed = startTimeRef.current
+      ? Math.min(durationSeconds, Math.max(2, accumulatedElapsedRef.current + (Date.now() - startTimeRef.current) / 1000))
+      : Math.max(2, elapsedSeconds);
+    const finalElapsed = Math.max(2, Math.round(rawElapsed));
+    const safeDurationSeconds = Math.max(10, Math.round(durationSeconds || 600), finalElapsed);
 
     const metrics = calculateTypingMetrics(
       typedText,
       targetText,
       finalElapsed,
-      durationSeconds,
+      safeDurationSeconds,
       backspaceCount,
       selectedExamId,
       language
@@ -307,7 +309,7 @@ export const AuthenticExamTyping: React.FC<AuthenticExamTypingProps> = ({
       examName: currentExam.name,
       language,
       keyboardLayout: language === 'hindi' ? keyboardLayout : 'standard',
-      durationSeconds: Math.round(finalElapsed),
+      durationSeconds: safeDurationSeconds,
       passageTitle: activePassage.title,
       passageId: activePassage.id,
       metrics

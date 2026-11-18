@@ -6,6 +6,7 @@ service cloud.firestore {
     // ===============================================================
     // Helper Functions
     // ===============================================================
+
     function isAuthenticated() {
       return request.auth != null;
     }
@@ -14,236 +15,315 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
-    /**
-     * Trusted server-side admin verification:
-     * 1. Firebase Auth Custom Claims (`request.auth.token.admin == true` or `request.auth.token.role == 'admin'`)
-     * 2. Server-provisioned `/admins/{uid}` document (write-denied to all clients)
-     * Never trusts client-writable profile fields or unverified email addresses.
-     */
+    // Checks whether a server-managed /admins/{uid} document explicitly revokes
+    // or deactivates admin privileges. Because Firebase custom claims remain cached
+    // in client ID tokens for up to 1 hour until token refresh, checking /admins/{uid}
+    // for `revoked == true` provides immediate server-side revocation enforcement.
+    function isAdminRevoked() {
+      return exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+        (
+          get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.get('revoked', false) == true ||
+          get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.get('active', true) == false
+        );
+    }
+
+    function hasActiveAdminRegistryDoc() {
+      return exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.get('revoked', false) != true &&
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.get('active', true) != false;
+    }
+
+    // Trusted server-side admin verification:
+    // Requires a verified email address, no revocation entry in /admins/{uid}, and either:
+    // 1. Firebase Auth custom claims (request.auth.token.admin == true or role == 'admin'), OR
+    // 2. A server-managed /admins/{uid} registry document where `revoked` is not true.
     function isAdmin() {
-      return isAuthenticated() && (
-        request.auth.token.admin == true ||
-        request.auth.token.role == 'admin' ||
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
-      );
+      return isAuthenticated() &&
+        request.auth.token.email_verified == true &&
+        !isAdminRevoked() && (
+          request.auth.token.admin == true ||
+          request.auth.token.role == 'admin' ||
+          hasActiveAdminRegistryDoc()
+        );
     }
 
-    function isValidUserProfile(data) {
-      return data.keys().hasAll(['uid']) &&
-             data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'targetExam', 'referralCode', 'joinedDate', 'createdAt', 'updatedAt']) &&
-             data.uid == request.auth.uid &&
-             (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 80)) &&
-             (!('email' in data) || (data.email is string && data.email.size() <= 120)) &&
-             (!('targetExam' in data) || (data.targetExam is string && data.targetExam.size() <= 40)) &&
-             (!('referralCode' in data) || (data.referralCode is string && data.referralCode.matches('^TW-[A-Z0-9]{6,10}$')));
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
     }
 
-    function isValidResultMetrics(metrics, durationSeconds) {
+    function isNumberInRange(val, minVal, maxVal) {
+      return (val is int || val is float) && val >= minVal && val <= maxVal;
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUserProfile(data, uid) {
+      return data.keys().hasOnly([
+        'uid', 'email', 'displayName', 'photoURL', 'role', 'isPro', 'proExpiryDate',
+        'targetExam', 'emailVerified', 'referralCode', 'referredBy', 'joinedDate',
+        'referralCount', 'rewardDaysEarned', 'createdAt', 'lastLoginAt', 'updatedAt'
+      ]) &&
+      data.get('uid', uid) == uid &&
+      (!('displayName' in data) || data.displayName == null || isValidString(data.displayName, 1, 120)) &&
+      (!('email' in data) || data.email == null || (data.email is string && data.email.size() <= 200)) &&
+      (!('photoURL' in data) || data.photoURL == null || (data.photoURL is string && data.photoURL.size() <= 2048)) &&
+      (!('targetExam' in data) || (data.targetExam is string && data.targetExam.size() <= 60)) &&
+      (!('joinedDate' in data) || (data.joinedDate is string && data.joinedDate.size() <= 60)) &&
+      (!('emailVerified' in data) || data.emailVerified is bool) &&
+      (!('referralCode' in data) || (data.referralCode is string && data.referralCode.size() >= 4 && data.referralCode.size() <= 32)) &&
+      (!('referredBy' in data) || data.referredBy == null || (data.referredBy is string && data.referredBy.size() <= 32)) &&
+      (!('referralCount' in data) || isNumberInRange(data.referralCount, 0, 100000)) &&
+      (!('rewardDaysEarned' in data) || isNumberInRange(data.rewardDaysEarned, 0, 36500));
+    }
+
+    function isValidMetricsMap(metrics, durationSeconds) {
       return metrics is map &&
-             metrics.keys().hasAll(['netWpm', 'grossWpm', 'accuracy', 'totalChars', 'correctChars', 'incorrectChars', 'errors', 'backspaceCount', 'keyDepressions', 'elapsedSeconds', 'isQualified']) &&
-             metrics.keys().hasOnly(['netWpm', 'grossWpm', 'accuracy', 'totalChars', 'correctChars', 'incorrectChars', 'errors', 'backspaceCount', 'keyDepressions', 'elapsedSeconds', 'kdph', 'isQualified', 'grade']) &&
-             metrics.netWpm is number && metrics.netWpm >= 0 && metrics.netWpm <= 250 &&
-             metrics.grossWpm is number && metrics.grossWpm >= 0 && metrics.grossWpm <= 300 &&
-             metrics.netWpm <= metrics.grossWpm + 0.01 &&
-             metrics.accuracy is number && metrics.accuracy >= 0 && metrics.accuracy <= 100 &&
-             metrics.totalChars is number && metrics.totalChars >= 0 && metrics.totalChars <= 50000 &&
-             metrics.correctChars is number && metrics.correctChars >= 0 && metrics.correctChars <= metrics.totalChars &&
-             metrics.incorrectChars is number && metrics.incorrectChars >= 0 &&
-             (metrics.correctChars + metrics.incorrectChars == metrics.totalChars) &&
-             metrics.errors is number && metrics.errors >= 0 && metrics.errors <= 50000 &&
-             metrics.backspaceCount is number && metrics.backspaceCount >= 0 && metrics.backspaceCount <= 50000 &&
-             metrics.keyDepressions is number && metrics.keyDepressions >= metrics.totalChars && metrics.keyDepressions <= 60000 &&
-             metrics.elapsedSeconds is number && metrics.elapsedSeconds >= 1 && metrics.elapsedSeconds <= durationSeconds &&
-             metrics.isQualified is bool &&
-             // Mathematical WPM consistency: grossWpm must match (totalChars / 5) / (elapsedSeconds / 60) within rounding tolerance
-             (
-               (metrics.totalChars == 0 && metrics.grossWpm == 0 && metrics.netWpm == 0) ||
-               (
-                 metrics.totalChars > 0 &&
-                 (metrics.grossWpm * metrics.elapsedSeconds >= (metrics.totalChars * 12) - (metrics.elapsedSeconds * 5)) &&
-                 (metrics.grossWpm * metrics.elapsedSeconds <= (metrics.totalChars * 12) + (metrics.elapsedSeconds * 5))
-               )
-             ) &&
-             // Mathematical accuracy consistency: accuracy must match (correctChars / totalChars) * 100 within rounding tolerance
-             (
-               metrics.totalChars == 0 ||
-               (
-                 (metrics.accuracy * metrics.totalChars >= (metrics.correctChars * 100) - (metrics.totalChars * 2)) &&
-                 (metrics.accuracy * metrics.totalChars <= (metrics.correctChars * 100) + (metrics.totalChars * 2))
-               )
-             );
+        metrics.keys().hasOnly([
+          'grossWpm', 'netWpm', 'accuracy', 'totalChars', 'correctChars',
+          'incorrectChars', 'errors', 'backspaceCount', 'keyDepressions',
+          'elapsedSeconds', 'remainingSeconds', 'isQualified', 'kdph', 'grade'
+        ]) &&
+        isNumberInRange(metrics.grossWpm, 0, 300) &&
+        isNumberInRange(metrics.netWpm, 0, 300) &&
+        metrics.netWpm <= metrics.grossWpm &&
+        isNumberInRange(metrics.accuracy, 0, 100) &&
+        isNumberInRange(metrics.totalChars, 1, 50000) &&
+        isNumberInRange(metrics.correctChars, 0, 50000) &&
+        isNumberInRange(metrics.incorrectChars, 0, 50000) &&
+        metrics.correctChars <= metrics.totalChars &&
+        metrics.correctChars + metrics.incorrectChars <= metrics.totalChars + 5 &&
+        isNumberInRange(metrics.errors, 0, 50000) &&
+        isNumberInRange(metrics.backspaceCount, 0, 50000) &&
+        isNumberInRange(metrics.keyDepressions, 0, 60000) &&
+        isNumberInRange(metrics.elapsedSeconds, 1, 7200) &&
+        metrics.elapsedSeconds <= durationSeconds + 1 &&
+        (!('remainingSeconds' in metrics) || isNumberInRange(metrics.remainingSeconds, 0, 7200)) &&
+        metrics.isQualified is bool &&
+        // Mathematical consistency check: grossWpm must align with (totalChars / 5) / (elapsedSeconds / 60) within rounding tolerance (+/- 8 WPM)
+        metrics.grossWpm * 5 * metrics.elapsedSeconds <= (metrics.totalChars * 60) + (8 * 5 * metrics.elapsedSeconds) &&
+        metrics.totalChars * 60 <= (metrics.grossWpm * 5 * metrics.elapsedSeconds) + (8 * 5 * metrics.elapsedSeconds) &&
+        (!('kdph' in metrics) || isNumberInRange(metrics.kdph, 0, 100000)) &&
+        (!('grade' in metrics) || (metrics.grade is string && metrics.grade.size() <= 30));
     }
 
     function isValidTestResultDoc(data) {
-      return data.keys().hasAll(['userId', 'testId', 'examId', 'examName', 'language', 'keyboardLayout', 'durationSeconds', 'passageTitle', 'passageId', 'metrics', 'timestamp', 'createdAt']) &&
-             data.keys().hasOnly(['userId', 'userEmail', 'username', 'photoURL', 'testId', 'examId', 'examName', 'language', 'keyboardLayout', 'durationSeconds', 'passageTitle', 'passageId', 'metrics', 'timestamp', 'createdAt']) &&
-             data.userId == request.auth.uid &&
-             data.testId is string && data.testId.size() >= 3 && data.testId.size() <= 64 &&
-             data.examId is string && data.examId.size() >= 2 && data.examId.size() <= 40 &&
-             data.examName is string && data.examName.size() >= 1 && data.examName.size() <= 120 &&
-             data.language in ['english', 'hindi'] &&
-             data.keyboardLayout is string && data.keyboardLayout.size() >= 1 && data.keyboardLayout.size() <= 40 &&
-             data.passageTitle is string && data.passageTitle.size() <= 160 &&
-             data.passageId is string && data.passageId.size() <= 80 &&
-             data.durationSeconds is number && data.durationSeconds >= 10 && data.durationSeconds <= 3600 &&
-             data.timestamp is number &&
-             data.createdAt == request.time &&
-             isValidResultMetrics(data.metrics, data.durationSeconds);
+      return data.keys().hasOnly([
+        'id', 'testId', 'userId', 'userEmail', 'username', 'photoURL',
+        'examId', 'examName', 'language', 'keyboardLayout',
+        'durationSeconds', 'passageId', 'passageTitle',
+        'metrics', 'timestamp', 'createdAt'
+      ]) &&
+      isValidString(data.id, 1, 120) &&
+      (!('testId' in data) || data.testId == data.id) &&
+      data.userId == request.auth.uid &&
+      (!('userEmail' in data) || data.userEmail == null || (data.userEmail is string && data.userEmail.size() <= 200)) &&
+      (!('username' in data) || data.username == null || (data.username is string && data.username.size() <= 120)) &&
+      (!('photoURL' in data) || data.photoURL == null || (data.photoURL is string && data.photoURL.size() <= 2048)) &&
+      isValidString(data.examId, 1, 60) &&
+      isValidString(data.examName, 1, 120) &&
+      data.language in ['english', 'hindi'] &&
+      (!('keyboardLayout' in data) || (data.keyboardLayout is string && data.keyboardLayout.size() <= 40)) &&
+      isNumberInRange(data.durationSeconds, 10, 7200) &&
+      data.passageId is string && data.passageId.size() >= 1 && data.passageId.size() <= 80 &&
+      data.passageTitle is string && data.passageTitle.size() >= 1 && data.passageTitle.size() <= 160 &&
+      isValidMetricsMap(data.metrics, data.durationSeconds) &&
+      isNumberInRange(data.timestamp, 1000000000000, 9999999999999) &&
+      'createdAt' in data &&
+      data.createdAt == request.time;
     }
 
-    /**
-     * Verifies that a leaderboard entry is backed by an immutable, mathematically validated
-     * test result document in `/users/{uid}/results/{testId}` rather than trusting raw client-reported WPM.
-     */
+    // Security note: Firestore rules validate schema, user ownership, server timestamps,
+    // rate-limit cooldowns, human WPM/accuracy plausibility ceilings, and cross-document
+    // consistency with the user's immutable result document. They do not by themselves
+    // prove that a browser did not synthesize keystrokes; backend verification (/api/results/verify)
+    // provides additional validation and rate limiting.
     function isBackedByVerifiedResult(data) {
-      let resultPath = /databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId);
-      return exists(resultPath) &&
-             get(resultPath).data.userId == request.auth.uid &&
-             get(resultPath).data.examId == data.examId &&
-             get(resultPath).data.language == data.language &&
-             get(resultPath).data.metrics.netWpm == data.netWpm &&
-             get(resultPath).data.metrics.grossWpm == data.grossWpm &&
-             get(resultPath).data.metrics.accuracy == data.accuracy &&
-             get(resultPath).data.metrics.totalChars >= 25 &&
-             get(resultPath).data.metrics.elapsedSeconds >= 10;
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId)).data.userId == request.auth.uid &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId)).data.examId == data.examId &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId)).data.language == data.language &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId)).data.metrics.netWpm == data.netWpm &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId)).data.metrics.netWpm == data.wpm &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId)).data.metrics.grossWpm == data.grossWpm &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId)).data.metrics.accuracy == data.accuracy &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId)).data.metrics.errors == data.mistakes &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId)).data.durationSeconds == data.durationSeconds &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId)).data.metrics.elapsedSeconds >= 10 &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/results/$(data.testId)).data.metrics.totalChars >= 25;
     }
 
     function isValidLeaderboardEntry(data) {
-      return data.keys().hasAll(['userId', 'testId', 'username', 'photoURL', 'netWpm', 'grossWpm', 'accuracy', 'exam', 'examId', 'language', 'date', 'timestamp']) &&
-             data.keys().hasOnly(['userId', 'testId', 'username', 'photoURL', 'netWpm', 'grossWpm', 'accuracy', 'exam', 'examId', 'language', 'date', 'timestamp']) &&
-             data.userId == request.auth.uid &&
-             data.testId is string && data.testId.size() >= 3 && data.testId.size() <= 64 &&
-             data.username is string && data.username.size() >= 1 && data.username.size() <= 60 &&
-             data.photoURL is string && data.photoURL.size() <= 500 &&
-             data.exam is string && data.exam.size() >= 1 && data.exam.size() <= 120 &&
-             data.examId is string && data.examId.size() >= 2 && data.examId.size() <= 40 &&
-             data.language in ['english', 'hindi'] &&
-             data.date is string && data.date.size() >= 1 && data.date.size() <= 40 &&
-             data.netWpm is number && data.netWpm >= 0 && data.netWpm <= 250 &&
-             data.grossWpm is number && data.grossWpm >= 0 && data.grossWpm <= 300 &&
-             data.netWpm <= data.grossWpm + 0.01 &&
-             data.accuracy is number && data.accuracy >= 0 && data.accuracy <= 100 &&
-             data.timestamp == request.time &&
-             isBackedByVerifiedResult(data);
+      return data.keys().hasOnly([
+        'userId', 'username', 'name', 'photoURL', 'avatar',
+        'wpm', 'netWpm', 'grossWpm', 'accuracy', 'mistakes',
+        'exam', 'examId', 'language', 'durationSeconds', 'isQualified',
+        'testId', 'date', 'timestamp', 'updatedAt'
+      ]) &&
+      data.userId == request.auth.uid &&
+      isValidString(data.username, 1, 100) &&
+      (!('name' in data) || isValidString(data.name, 1, 100)) &&
+      (!('photoURL' in data) || data.photoURL == null || (data.photoURL is string && data.photoURL.size() <= 2048)) &&
+      (!('avatar' in data) || data.avatar == null || (data.avatar is string && data.avatar.size() <= 2048)) &&
+      // Plausible human typing ceilings for public leaderboard rankings
+      isNumberInRange(data.netWpm, 0, 220) &&
+      isNumberInRange(data.wpm, 0, 220) &&
+      data.wpm == data.netWpm &&
+      isNumberInRange(data.grossWpm, 0, 240) &&
+      data.netWpm <= data.grossWpm &&
+      isNumberInRange(data.accuracy, 50, 100) &&
+      isNumberInRange(data.mistakes, 0, 50000) &&
+      isValidString(data.exam, 1, 120) &&
+      isValidString(data.examId, 1, 60) &&
+      data.language in ['english', 'hindi'] &&
+      isNumberInRange(data.durationSeconds, 10, 7200) &&
+      data.isQualified is bool &&
+      isValidString(data.testId, 1, 120) &&
+      (!('date' in data) || (data.date is string && data.date.size() <= 40)) &&
+      (!('timestamp' in data) || data.timestamp == request.time || isNumberInRange(data.timestamp, 1000000000000, 9999999999999)) &&
+      'updatedAt' in data &&
+      data.updatedAt == request.time &&
+      isBackedByVerifiedResult(data);
     }
 
-    function isValidCourseProgress(data, userId) {
-      return data.keys().hasAll(['userId', 'highestUnlockedLessonNumber']) &&
-             data.keys().hasOnly(['userId', 'currentLessonNumber', 'highestUnlockedLessonNumber', 'completedLessonIds', 'bestWpm', 'avgWpm', 'avgAccuracy', 'totalAttempts', 'passedAttempts', 'currentStreak', 'lastActiveDate', 'lastUpdated']) &&
-             data.userId == userId &&
-             data.highestUnlockedLessonNumber is number &&
-             data.highestUnlockedLessonNumber >= 1 &&
-             data.highestUnlockedLessonNumber <= 120 &&
-             (!('bestWpm' in data) || (data.bestWpm is number && data.bestWpm >= 0 && data.bestWpm <= 250)) &&
-             (!('avgAccuracy' in data) || (data.avgAccuracy is number && data.avgAccuracy >= 0 && data.avgAccuracy <= 100));
+    function isValidCourseProgress(data, uid) {
+      return data.keys().hasOnly([
+        'userId', 'currentLessonNumber', 'highestUnlockedLessonNumber',
+        'completedLessonIds', 'bestWpm', 'avgWpm', 'avgAccuracy',
+        'totalAttempts', 'passedAttempts', 'currentStreak', 'lastActiveDate',
+        'todayWordsTyped', 'todayPracticeTimeSeconds', 'lastUpdated'
+      ]) &&
+      data.userId == uid &&
+      isNumberInRange(data.currentLessonNumber, 1, 500) &&
+      isNumberInRange(data.highestUnlockedLessonNumber, 1, 500) &&
+      data.completedLessonIds is list &&
+      data.completedLessonIds.size() <= 500 &&
+      isNumberInRange(data.bestWpm, 0, 300) &&
+      isNumberInRange(data.avgWpm, 0, 300) &&
+      isNumberInRange(data.avgAccuracy, 0, 100) &&
+      isNumberInRange(data.totalAttempts, 0, 1000000) &&
+      isNumberInRange(data.passedAttempts, 0, 1000000) &&
+      isNumberInRange(data.currentStreak, 0, 100000) &&
+      data.lastActiveDate is string &&
+      data.lastActiveDate.size() <= 30 &&
+      isNumberInRange(data.todayWordsTyped, 0, 1000000) &&
+      isNumberInRange(data.todayPracticeTimeSeconds, 0, 864000) &&
+      isNumberInRange(data.lastUpdated, 0, 9999999999999);
     }
 
-    function isValidLessonAttempt(data, userId) {
-      return data.keys().hasAll(['userId', 'lessonId', 'netWpm', 'grossWpm', 'accuracy', 'passed', 'timestamp']) &&
-             data.keys().hasOnly(['userId', 'lessonId', 'lessonNumber', 'lessonName', 'netWpm', 'grossWpm', 'accuracy', 'errors', 'backspaces', 'durationSeconds', 'passed', 'timestamp', 'createdAt']) &&
-             data.userId == userId &&
-             data.lessonId is string && data.lessonId.size() <= 60 &&
-             data.netWpm is number && data.netWpm >= 0 && data.netWpm <= 250 &&
-             data.grossWpm is number && data.grossWpm >= 0 && data.grossWpm <= 300 &&
-             data.netWpm <= data.grossWpm + 0.01 &&
-             data.accuracy is number && data.accuracy >= 0 && data.accuracy <= 100 &&
-             data.passed is bool &&
-             data.timestamp is number;
-    }
-
-    function isValidReferralRecord(data, referredUid) {
-      return data.keys().hasAll(['referrerUid', 'referrerCode', 'referredUid', 'referredEmail', 'referredName', 'timestamp', 'daysAwarded', 'status', 'createdAt']) &&
-             data.keys().hasOnly(['referrerUid', 'referrerCode', 'referredUid', 'referredEmail', 'referredName', 'timestamp', 'daysAwarded', 'status', 'createdAt']) &&
-             data.referredUid == request.auth.uid &&
-             data.referredUid == referredUid &&
-             data.referrerUid is string &&
-             data.referrerUid.size() >= 4 &&
-             data.referrerUid != request.auth.uid &&
-             data.referrerCode is string &&
-             data.referrerCode.matches('^TW-[A-Z0-9]{6,10}$') &&
-             data.referredEmail is string && data.referredEmail.size() <= 120 &&
-             data.referredName is string && data.referredName.size() <= 80 &&
-             data.daysAwarded == 0 &&
-             data.status == 'recorded' &&
-             data.timestamp is number &&
-             data.createdAt == request.time;
+    function isValidLessonAttempt(data, uid) {
+      return data.keys().hasOnly([
+        'id', 'lessonId', 'lessonNumber', 'lessonName', 'userId',
+        'timestamp', 'date', 'grossWpm', 'netWpm', 'accuracy',
+        'errors', 'backspaces', 'durationSeconds', 'passed',
+        'attemptNumber', 'createdAt'
+      ]) &&
+      data.userId == uid &&
+      isValidString(data.id, 1, 120) &&
+      isValidString(data.lessonId, 1, 80) &&
+      isNumberInRange(data.lessonNumber, 1, 500) &&
+      isValidString(data.lessonName, 1, 160) &&
+      isNumberInRange(data.grossWpm, 0, 300) &&
+      isNumberInRange(data.netWpm, 0, 300) &&
+      isNumberInRange(data.accuracy, 0, 100) &&
+      isNumberInRange(data.errors, 0, 50000) &&
+      isNumberInRange(data.backspaces, 0, 50000) &&
+      isNumberInRange(data.durationSeconds, 1, 7200) &&
+      data.passed is bool &&
+      isNumberInRange(data.attemptNumber, 1, 1000000) &&
+      isNumberInRange(data.timestamp, 1000000000000, 9999999999999) &&
+      data.date is string &&
+      data.date.size() <= 30 &&
+      (!('createdAt' in data) || data.createdAt == request.time);
     }
 
     // ===============================================================
-    // 0. Server-Managed Admin Registry (/admins/{adminId})
+    // Server-Managed Admin Registry (No client writes permitted)
     // ===============================================================
     match /admins/{adminId} {
-      allow get: if isOwner(adminId) || isAdmin();
-      allow list: if isAdmin();
-      // Only assignable/revocable via Firebase Admin SDK or Google Cloud Console
+      allow read: if isOwner(adminId) || isAdmin();
       allow create, update, delete: if false;
     }
 
     // ===============================================================
-    // 1. User Profiles & Personal Subcollections
+    // Users & User Subcollections
     // ===============================================================
     match /users/{userId} {
-      allow get: if isOwner(userId) || isAdmin();
-      allow list: if isAdmin();
+      allow read: if isOwner(userId) || isAdmin();
 
-      // Ordinary users cannot set role, isPro, or proExpiryDate on creation
+      // Ordinary users can create their own profile with role == 'user' and isPro == false
       allow create: if isOwner(userId) &&
-                    isValidUserProfile(request.resource.data) &&
-                    !('role' in request.resource.data) &&
-                    !('isPro' in request.resource.data) &&
-                    !('proExpiryDate' in request.resource.data);
+                    isValidUserProfile(request.resource.data, userId) &&
+                    request.resource.data.get('role', 'user') == 'user' &&
+                    request.resource.data.get('isPro', false) == false &&
+                    request.resource.data.get('proExpiryDate', null) == null &&
+                    request.resource.data.get('referralCount', 0) == 0 &&
+                    request.resource.data.get('rewardDaysEarned', 0) == 0;
 
-      // Ordinary users cannot escalate role or modify subscription fields
-      allow update: if isAdmin() || (
-                      isOwner(userId) &&
-                      isValidUserProfile(request.resource.data) &&
-                      request.resource.data.uid == resource.data.uid &&
-                      !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'isPro', 'proExpiryDate', 'uid', 'createdAt'])
-                    );
+      // Ordinary users can update non-privileged profile fields, but can never
+      // escalate role, isPro, proExpiryDate, referralCount, rewardDaysEarned, or uid
+      allow update: if (
+        isOwner(userId) &&
+        isValidUserProfile(request.resource.data, userId) &&
+        request.resource.data.get('uid', userId) == resource.data.get('uid', userId) &&
+        request.resource.data.get('role', 'user') == resource.data.get('role', 'user') &&
+        request.resource.data.get('isPro', false) == resource.data.get('isPro', false) &&
+        request.resource.data.get('proExpiryDate', null) == resource.data.get('proExpiryDate', null) &&
+        request.resource.data.get('referralCount', 0) == resource.data.get('referralCount', 0) &&
+        request.resource.data.get('rewardDaysEarned', 0) == resource.data.get('rewardDaysEarned', 0) &&
+        (
+          !('createdAt' in resource.data) ||
+          !('createdAt' in request.resource.data) ||
+          request.resource.data.createdAt == resource.data.createdAt ||
+          request.resource.data.createdAt == request.time
+        )
+      ) || isAdmin();
 
       allow delete: if isAdmin();
 
-      // Immutable personal typing test results subcollection
+      // User Test Results (Immutable once created by owner)
       match /results/{resultId} {
         allow read: if isOwner(userId) || isAdmin();
         allow create: if isOwner(userId) &&
-                      !exists(/databases/$(database)/documents/users/$(userId)/results/$(resultId)) &&
-                      resultId == request.resource.data.testId &&
+                      resultId == request.resource.data.id &&
                       isValidTestResultDoc(request.resource.data);
-        // Completed result records are strictly immutable
-        allow update, delete: if false;
+        allow update: if false;
+        allow delete: if isAdmin();
       }
 
-      // Personal touch-typing course progress subcollection
+      // User Touch Typing Course Progress
       match /learning_progress/{docId} {
         allow read: if isOwner(userId) || isAdmin();
         allow create, update: if isOwner(userId) && isValidCourseProgress(request.resource.data, userId);
         allow delete: if isAdmin();
       }
 
-      // Immutable personal touch-typing lesson attempts subcollection
-      match /learning_results/{resultId} {
+      // User Touch Typing Lesson Attempts (Immutable once recorded)
+      match /learning_results/{attemptId} {
         allow read: if isOwner(userId) || isAdmin();
         allow create: if isOwner(userId) && isValidLessonAttempt(request.resource.data, userId);
-        allow update, delete: if false;
+        allow update: if false;
+        allow delete: if isAdmin();
       }
     }
 
     // ===============================================================
-    // 2. Root Test Results Audit Collection (Immutable)
+    // Root Test Results Audit Log (Immutable once created)
     // ===============================================================
-    match /user_results/{resultId} {
-      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    match /user_results/{resultDocId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid || isAdmin()
+      );
       allow create: if isAuthenticated() &&
-                    !exists(/databases/$(database)/documents/user_results/$(resultId)) &&
-                    resultId == (request.auth.uid + '_' + request.resource.data.testId) &&
+                    resultDocId == (request.auth.uid + '_' + request.resource.data.id) &&
                     isValidTestResultDoc(request.resource.data);
-      // Completed audit result records are strictly immutable
-      allow update, delete: if false;
+      allow update: if false;
+      allow delete: if isAdmin();
     }
 
     // ===============================================================
-    // 3. Public Leaderboard Collection (Deterministic & Verified Result Linked)
+    // Public Leaderboard (One best-score document per user+exam+language)
     // ===============================================================
     match /leaderboard/{entryId} {
       allow read: if true;
@@ -252,86 +332,111 @@ service cloud.firestore {
                     entryId == (request.auth.uid + '_' + request.resource.data.examId + '_' + request.resource.data.language) &&
                     isValidLeaderboardEntry(request.resource.data);
 
-      // Updates are only permitted when backed by a new distinct verified test result that strictly improves personal best
+      // Only allow updating own entry when a genuinely new testId improves WPM
+      // (or improves/matches accuracy at equal WPM), and enforce a 5-second server-clock cooldown
       allow update: if isAuthenticated() &&
+                    entryId == (request.auth.uid + '_' + request.resource.data.examId + '_' + request.resource.data.language) &&
                     resource.data.userId == request.auth.uid &&
+                    request.resource.data.userId == request.auth.uid &&
                     request.resource.data.examId == resource.data.examId &&
                     request.resource.data.language == resource.data.language &&
-                    request.resource.data.testId != resource.data.testId &&
-                    entryId == (request.auth.uid + '_' + request.resource.data.examId + '_' + request.resource.data.language) &&
                     isValidLeaderboardEntry(request.resource.data) &&
+                    request.resource.data.testId != resource.data.testId &&
                     (
-                      request.resource.data.netWpm > resource.data.netWpm ||
-                      (request.resource.data.netWpm == resource.data.netWpm && request.resource.data.accuracy > resource.data.accuracy)
+                      !('updatedAt' in resource.data) ||
+                      !(resource.data.updatedAt is timestamp) ||
+                      request.time >= resource.data.updatedAt + duration.value(5, 's')
+                    ) &&
+                    (
+                      request.resource.data.netWpm > resource.data.get('netWpm', resource.data.get('wpm', -1)) ||
+                      (
+                        request.resource.data.netWpm == resource.data.get('netWpm', resource.data.get('wpm', -1)) &&
+                        request.resource.data.accuracy >= resource.data.get('accuracy', 0)
+                      )
                     );
 
       allow delete: if isAdmin();
     }
 
     // ===============================================================
-    // 4. Referral Code Registry & Verified One-Time Referrals
+    // Referral Code Directory (Maps public code -> owner UID)
     // ===============================================================
     match /referral_codes/{code} {
-      allow get: if isAuthenticated();
-      allow list: if isAdmin();
-      // Referral codes are unique and permanently bound to their creator's UID upon creation
+      allow read: if isAuthenticated();
       allow create: if isAuthenticated() &&
-                    !exists(/databases/$(database)/documents/referral_codes/$(code)) &&
-                    code.matches('^TW-[A-Z0-9]{6,10}$') &&
-                    request.resource.data.keys().hasAll(['code', 'uid', 'createdAt']) &&
-                    request.resource.data.keys().hasOnly(['code', 'uid', 'createdAt']) &&
+                    code.size() >= 6 &&
+                    code.size() <= 24 &&
+                    request.resource.data.keys().hasOnly(['code', 'uid', 'ownerUid', 'createdAt']) &&
                     request.resource.data.code == code &&
-                    request.resource.data.uid == request.auth.uid &&
-                    (request.resource.data.createdAt == request.time || request.resource.data.createdAt is number);
-      // Registered referral codes cannot be reassigned, overwritten, or deleted by users
-      allow update, delete: if false;
-    }
-
-    match /referrals/{referredUid} {
-      allow read: if isAuthenticated() && (
-                    referredUid == request.auth.uid ||
-                    resource.data.referredUid == request.auth.uid ||
-                    resource.data.referrerUid == request.auth.uid ||
-                    isAdmin()
-                  );
-      // Enforce 1 referral redemption per referredUid, verified against registered /referral_codes/{code}
-      allow create: if isOwner(referredUid) &&
-                    !exists(/databases/$(database)/documents/referrals/$(referredUid)) &&
-                    isValidReferralRecord(request.resource.data, referredUid) &&
-                    exists(/databases/$(database)/documents/referral_codes/$(request.resource.data.referrerCode)) &&
-                    get(/databases/$(database)/documents/referral_codes/$(request.resource.data.referrerCode)).data.uid == request.resource.data.referrerUid &&
-                    get(/databases/$(database)/documents/referral_codes/$(request.resource.data.referrerCode)).data.uid != request.auth.uid;
-      // Referral records are strictly immutable once created to prevent duplicate rewards
-      allow update, delete: if false;
+                    request.resource.data.get('ownerUid', request.resource.data.get('uid', '')) == request.auth.uid &&
+                    request.resource.data.get('uid', request.auth.uid) == request.auth.uid &&
+                    request.resource.data.createdAt == request.time;
+      allow update, delete: if isAdmin();
     }
 
     // ===============================================================
-    // 5. Subscriptions Collection (Server/Admin Managed Only)
+    // Referrals (One referral claim per referred user, verified against /referral_codes)
+    // ===============================================================
+    match /referrals/{referralId} {
+      allow read: if isAuthenticated() && (
+        resource.data.referredUid == request.auth.uid ||
+        resource.data.referrerUid == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated() &&
+                    (referralId == request.auth.uid || referralId == ('ref_' + request.auth.uid)) &&
+                    request.resource.data.keys().hasOnly([
+                      'referrerCode', 'referrerUid', 'referredUid',
+                      'referredEmail', 'referredName', 'timestamp',
+                      'daysAwarded', 'rewardDays', 'status', 'createdAt'
+                    ]) &&
+                    request.resource.data.referredUid == request.auth.uid &&
+                    request.resource.data.referrerUid is string &&
+                    request.resource.data.referrerUid != request.auth.uid &&
+                    request.resource.data.referrerCode is string &&
+                    request.resource.data.referrerCode.size() >= 6 &&
+                    request.resource.data.referrerCode.size() <= 24 &&
+                    (!('referredEmail' in request.resource.data) || (request.resource.data.referredEmail is string && request.resource.data.referredEmail.size() <= 200)) &&
+                    (!('referredName' in request.resource.data) || (request.resource.data.referredName is string && request.resource.data.referredName.size() <= 120)) &&
+                    (!('timestamp' in request.resource.data) || isNumberInRange(request.resource.data.timestamp, 1000000000000, 9999999999999)) &&
+                    exists(/databases/$(database)/documents/referral_codes/$(request.resource.data.referrerCode)) &&
+                    get(/databases/$(database)/documents/referral_codes/$(request.resource.data.referrerCode)).data.get('ownerUid', get(/databases/$(database)/documents/referral_codes/$(request.resource.data.referrerCode)).data.get('uid', '')) == request.resource.data.referrerUid &&
+                    request.resource.data.status in ['pending', 'verified', 'recorded'] &&
+                    request.resource.data.get('rewardDays', 0) == 0 &&
+                    request.resource.data.get('daysAwarded', 0) == 0 &&
+                    request.resource.data.createdAt == request.time;
+      allow update, delete: if isAdmin();
+    }
+
+    // ===============================================================
+    // Subscriptions (Server/Admin Managed Only — No self-granting)
     // ===============================================================
     match /subscriptions/{userId} {
       allow read: if isOwner(userId) || isAdmin();
-      allow write: if isAdmin();
+      allow create, update, delete: if isAdmin();
     }
 
     // ===============================================================
-    // 6. Content Collections (Passages, Exams, Lessons - Admin Write Only)
+    // Admin CMS Collections (Public Read, Admin Write Only)
     // ===============================================================
     match /passages/{passageId} {
       allow read: if true;
-      allow write: if isAdmin();
+      allow create, update, delete: if isAdmin();
     }
 
     match /exams/{examId} {
       allow read: if true;
-      allow write: if isAdmin();
+      allow create, update, delete: if isAdmin();
     }
 
     match /learning_lessons/{lessonId} {
       allow read: if true;
-      allow write: if isAdmin();
+      allow create, update, delete: if isAdmin();
     }
 
-    // Default deny catch-all
+    // ===============================================================
+    // Default Deny All Other Paths
+    // ===============================================================
     match /{document=**} {
       allow read, write: if false;
     }

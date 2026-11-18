@@ -12,7 +12,21 @@ import {
   transliterateNewInputToHindi
 } from '../hindiKeyboards';
 import { BUILTIN_COURSE_LESSONS } from '../../data/touchTypingCourseCurriculum';
-import { StorageService, validateTestResultPayload } from '../../services/storageService';
+import {
+  StorageService,
+  validateTestResultPayload,
+  buildNormalizedResultPayloads,
+  executeResultSyncSteps
+} from '../../services/storageService';
+import {
+  verifyLeaderboardSubmissionPayload,
+  checkSubmissionRateLimit,
+  resetSubmissionRateLimiterForTesting
+} from '../../services/resultVerification';
+import {
+  sanitizeCourseProgressPayload,
+  sanitizeLessonAttemptPayload
+} from '../../services/learningProgressService';
 import { parseRouteFromPath, SITE_BASE_URL } from '../../utils/seo';
 import { TestResultRecord } from '../../types';
 
@@ -47,7 +61,7 @@ function createValidResultFixture(overrides?: Partial<TestResultRecord>): TestRe
   };
 }
 
-function runTypingEngineTests() {
+async function runTypingEngineTests() {
   console.log('Running Typing Wallah Automated Test Suite...\n');
 
   // 1. Timer behavior & edge cases: 0s elapsed, partial elapsed, and full duration
@@ -396,8 +410,276 @@ function runTypingEngineTests() {
     console.log('✓ Test 12 passed: Referral code collision fallbacks & owner binding');
   }
 
-  console.log('\nAll 12 automated test suites passed successfully!');
+  // 13. Admin Revocation & Custom Claim Revocation Handling in firestore.rules
+  {
+    const rulesPath = path.resolve(process.cwd(), 'firestore.rules');
+    const rulesContent = fs.readFileSync(rulesPath, 'utf-8');
+
+    assert.ok(
+      rulesContent.includes('function isAdminRevoked()') &&
+        rulesContent.includes("data.get('revoked', false) == true") &&
+        rulesContent.includes('!isAdminRevoked()'),
+      'firestore.rules isAdmin() must deny access when /admins/{uid} has revoked: true (even if custom claim is still cached in JWT)'
+    );
+    assert.ok(
+      rulesContent.includes('function hasActiveAdminRegistryDoc()') &&
+        rulesContent.includes("data.get('revoked', false) != true"),
+      'firestore.rules must verify /admins/{uid} does not have revoked: true before granting admin access'
+    );
+    assert.ok(
+      rulesContent.includes('request.auth.token.email_verified == true'),
+      'firestore.rules isAdmin() must require a verified email address'
+    );
+    assert.ok(
+      rulesContent.includes('match /admins/{adminId}') &&
+        rulesContent.includes('allow create, update, delete: if false;'),
+      'firestore.rules must deny all client writes to /admins/{adminId}'
+    );
+    console.log('✓ Test 13 passed: Admin revocation & custom-claim revocation rules verified');
+  }
+
+  // 14. Result-Sync Retry & Partial Failure Recovery (Immutable Step Skipping)
+  {
+    const validResult = createValidResultFixture({ id: 'retry_test_001' });
+    let userResultDocSaved = false;
+    let rootResultDocSaved = false;
+    let leaderboardDocData: Record<string, any> | null = null;
+    let userWriteCalls = 0;
+    let rootWriteCalls = 0;
+    let leaderWriteCalls = 0;
+
+    // Attempt 1: Step A succeeds, Step B throws transient network failure
+    await assert.rejects(
+      async () => {
+        await executeResultSyncSteps({
+          safeResultId: validResult.id,
+          leaderboardEligible: true,
+          netWpm: validResult.metrics.netWpm,
+          accuracy: validResult.metrics.accuracy,
+          userResultExists: async () => userResultDocSaved,
+          writeUserResult: async () => {
+            if (userResultDocSaved) {
+              throw new Error('PERMISSION_DENIED: Immutable user result cannot be overwritten');
+            }
+            userWriteCalls++;
+            userResultDocSaved = true;
+          },
+          rootResultExists: async () => rootResultDocSaved,
+          writeRootResult: async () => {
+            rootWriteCalls++;
+            throw new Error('Simulated network timeout on root audit write');
+          },
+          getExistingLeaderboardEntry: async () => leaderboardDocData,
+          writeLeaderboardEntry: async () => {
+            leaderWriteCalls++;
+          }
+        });
+      },
+      /Simulated network timeout/,
+      'Attempt 1 must propagate transient Step B failure so result stays queued for retry'
+    );
+
+    assert.equal(userResultDocSaved, true, 'Step A personal result was saved during Attempt 1');
+    assert.equal(rootResultDocSaved, false, 'Step B root audit result was not saved yet');
+    assert.equal(leaderboardDocData, null, 'Step C leaderboard was not updated yet');
+
+    // Attempt 2 (Retry): Step A already exists; retry must NOT overwrite Step A, and must complete Steps B & C
+    const retryOutcome = await executeResultSyncSteps({
+      safeResultId: validResult.id,
+      leaderboardEligible: true,
+      netWpm: validResult.metrics.netWpm,
+      accuracy: validResult.metrics.accuracy,
+      userResultExists: async () => userResultDocSaved,
+      writeUserResult: async () => {
+        throw new Error('PERMISSION_DENIED: Should not overwrite existing immutable personal result on retry');
+      },
+      rootResultExists: async () => rootResultDocSaved,
+      writeRootResult: async () => {
+        if (rootResultDocSaved) {
+          throw new Error('PERMISSION_DENIED: Immutable root result cannot be overwritten');
+        }
+        rootWriteCalls++;
+        rootResultDocSaved = true;
+      },
+      getExistingLeaderboardEntry: async () => leaderboardDocData,
+      writeLeaderboardEntry: async () => {
+        leaderWriteCalls++;
+        leaderboardDocData = {
+          testId: validResult.id,
+          netWpm: validResult.metrics.netWpm,
+          wpm: validResult.metrics.netWpm,
+          accuracy: validResult.metrics.accuracy
+        };
+      }
+    });
+
+    assert.equal(retryOutcome.wroteUserResult, false, 'Retry must skip already-existing Step A');
+    assert.equal(retryOutcome.wroteRootResult, true, 'Retry must complete Step B');
+    assert.equal(retryOutcome.wroteLeaderboard, true, 'Retry must complete Step C');
+    assert.equal(userWriteCalls, 1, 'Step A writeUserResult must only be called once across retries');
+
+    // Attempt 3 (Idempotent re-run when all 3 steps already succeeded): must perform zero writes
+    const idempotentOutcome = await executeResultSyncSteps({
+      safeResultId: validResult.id,
+      leaderboardEligible: true,
+      netWpm: validResult.metrics.netWpm,
+      accuracy: validResult.metrics.accuracy,
+      userResultExists: async () => userResultDocSaved,
+      writeUserResult: async () => {
+        throw new Error('Should not be called');
+      },
+      rootResultExists: async () => rootResultDocSaved,
+      writeRootResult: async () => {
+        throw new Error('Should not be called');
+      },
+      getExistingLeaderboardEntry: async () => leaderboardDocData,
+      writeLeaderboardEntry: async () => {
+        throw new Error('Should not update leaderboard with the same testId');
+      }
+    });
+
+    assert.equal(idempotentOutcome.wroteUserResult, false);
+    assert.equal(idempotentOutcome.wroteRootResult, false);
+    assert.equal(idempotentOutcome.wroteLeaderboard, false);
+    console.log('✓ Test 14 passed: Result-sync partial failure & idempotent retry recovery');
+  }
+
+  // 15. Trusted Backend Verification & Sliding-Window Rate Limiting
+  {
+    resetSubmissionRateLimiterForTesting();
+    const validFixture = createValidResultFixture();
+    const ver1 = verifyLeaderboardSubmissionPayload(validFixture, 'user_rate_1');
+    assert.equal(ver1.valid, true, 'Valid fixture must pass verification');
+    assert.equal(ver1.leaderboardEligible, true, 'Standard 600s exam result must be leaderboard eligible');
+
+    // Superhuman / automated WPM (>220 Net WPM) is valid for personal history if <=300, but excluded from public leaderboard
+    const superHumanFixture = createValidResultFixture({
+      metrics: {
+        ...validFixture.metrics,
+        totalChars: 11500,
+        correctChars: 11500,
+        incorrectChars: 0,
+        errors: 0,
+        keyDepressions: 11500,
+        elapsedSeconds: 600,
+        grossWpm: 230,
+        netWpm: 230,
+        accuracy: 100
+      }
+    });
+    const verSuper = verifyLeaderboardSubmissionPayload(superHumanFixture, 'user_rate_1');
+    assert.equal(verSuper.valid, true, '230 WPM is within personal storage bounds');
+    assert.equal(
+      verSuper.leaderboardEligible,
+      false,
+      'Net WPM > 220 ceiling must not be eligible for unverified public leaderboard'
+    );
+
+    // Rate limiter: First submission allowed, immediate second submission with different testId blocked (<3000ms), retry of same testId allowed
+    const baseTime = 1_700_000_000_000;
+    const rlFirst = checkSubmissionRateLimit('user_rate_1', 'test_A', baseTime);
+    assert.equal(rlFirst.allowed, true, 'First submission must be allowed');
+
+    const rlSameRetry = checkSubmissionRateLimit('user_rate_1', 'test_A', baseTime + 500);
+    assert.equal(rlSameRetry.allowed, true, 'Idempotent retry of the same testId must be allowed');
+
+    const rlRapidSecond = checkSubmissionRateLimit('user_rate_1', 'test_B', baseTime + 1000);
+    assert.equal(
+      rlRapidSecond.allowed,
+      false,
+      'Distinct testId submitted within 3-second cooldown must be rate-limited'
+    );
+
+    const rlAfterCooldown = checkSubmissionRateLimit('user_rate_1', 'test_B', baseTime + 3500);
+    assert.equal(rlAfterCooldown.allowed, true, 'Distinct testId after 3-second cooldown must be allowed');
+    console.log('✓ Test 15 passed: Backend leaderboard plausibility verification & sliding-window rate limiting');
+  }
+
+  // 16. Payload-to-Firestore-Rule Key Alignment Verification
+  {
+    const fixture = createValidResultFixture();
+    const payloads = buildNormalizedResultPayloads(
+      fixture,
+      {
+        uid: 'user_schema_check',
+        email: 'aspirant@example.com',
+        displayName: 'Ritik Aspirant',
+        photoURL: ''
+      },
+      'SERVER_TIMESTAMP'
+    );
+
+    const allowedResultKeys = new Set([
+      'id', 'testId', 'userId', 'userEmail', 'username', 'photoURL',
+      'examId', 'examName', 'language', 'keyboardLayout',
+      'durationSeconds', 'passageId', 'passageTitle',
+      'metrics', 'timestamp', 'createdAt'
+    ]);
+    for (const k of Object.keys(payloads.userResultPayload)) {
+      assert.ok(allowedResultKeys.has(k), `userResultPayload key "${k}" must be permitted by isValidTestResultDoc`);
+    }
+    for (const k of Object.keys(payloads.rootResultPayload)) {
+      assert.ok(allowedResultKeys.has(k), `rootResultPayload key "${k}" must be permitted by isValidTestResultDoc`);
+    }
+
+    const allowedMetricsKeys = new Set([
+      'grossWpm', 'netWpm', 'accuracy', 'totalChars', 'correctChars',
+      'incorrectChars', 'errors', 'backspaceCount', 'keyDepressions',
+      'elapsedSeconds', 'remainingSeconds', 'isQualified', 'kdph', 'grade'
+    ]);
+    for (const k of Object.keys(payloads.userResultPayload.metrics)) {
+      assert.ok(allowedMetricsKeys.has(k), `metrics key "${k}" must be permitted by isValidMetricsMap`);
+    }
+
+    const allowedLeaderboardKeys = new Set([
+      'userId', 'username', 'name', 'photoURL', 'avatar',
+      'wpm', 'netWpm', 'grossWpm', 'accuracy', 'mistakes',
+      'exam', 'examId', 'language', 'durationSeconds', 'isQualified',
+      'testId', 'date', 'timestamp', 'updatedAt'
+    ]);
+    for (const k of Object.keys(payloads.leaderboardPayload)) {
+      assert.ok(
+        allowedLeaderboardKeys.has(k),
+        `leaderboardPayload key "${k}" must be permitted by isValidLeaderboardEntry`
+      );
+    }
+
+    const progressPayload = sanitizeCourseProgressPayload(
+      { userId: 'guest', currentLessonNumber: 3, highestUnlockedLessonNumber: 4 },
+      'user_schema_check'
+    );
+    assert.equal(progressPayload.userId, 'user_schema_check', 'Course progress userId must match authenticated UID');
+
+    const attemptPayload = sanitizeLessonAttemptPayload(
+      {
+        id: 'att_1',
+        lessonId: 'lesson-1',
+        lessonNumber: 1,
+        lessonName: 'Home Row',
+        userId: 'guest',
+        timestamp: Date.now(),
+        date: '2026-10-30',
+        grossWpm: 35,
+        netWpm: 33,
+        accuracy: 96,
+        errors: 2,
+        backspaces: 1,
+        durationSeconds: 60,
+        passed: true,
+        attemptNumber: 1
+      },
+      'user_schema_check',
+      'SERVER_TIMESTAMP'
+    );
+    assert.equal(attemptPayload.userId, 'user_schema_check', 'Lesson attempt userId must match authenticated UID');
+    console.log('✓ Test 16 passed: All generated Firestore payloads strictly align with firestore.rules');
+  }
+
+  console.log('\nAll 16 automated test suites passed successfully!');
 }
 
-runTypingEngineTests();
+runTypingEngineTests().catch((err) => {
+  console.error('Automated test suite failed:', err);
+  process.exit(1);
+});
 

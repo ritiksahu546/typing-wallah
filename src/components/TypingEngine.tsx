@@ -169,12 +169,13 @@ export const TypingEngine: React.FC<TypingEngineProps> = ({
     setIsActive(false);
     setIsFinished(true);
 
-    const finalElapsed = Math.max(1.5, elapsedSeconds);
+    const finalElapsed = Math.max(2, Math.round(elapsedSeconds));
+    const safeDurationSeconds = Math.max(10, Math.round(durationSeconds || 600), finalElapsed);
     const finalMetrics = calculateTypingMetrics(
       typedText,
       targetText,
       finalElapsed,
-      durationSeconds,
+      safeDurationSeconds,
       backspaceCount,
       examId,
       passage.language
@@ -187,7 +188,7 @@ export const TypingEngine: React.FC<TypingEngineProps> = ({
       examName: examId === 'cpct' ? 'MP CPCT' : examId ? examId.toUpperCase() : 'General Practice',
       language: passage.language,
       keyboardLayout,
-      durationSeconds: Math.round(finalElapsed),
+      durationSeconds: safeDurationSeconds,
       passageTitle: passage.title,
       passageId: passage.id,
       metrics: finalMetrics

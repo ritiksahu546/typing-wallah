@@ -43,80 +43,218 @@ const MIN_SUBMISSION_INTERVAL_MS = 3000;
 // Server-verified subscription cache (never persisted to or trusted from localStorage)
 let verifiedCloudSubscription: UserSubscription | null = null;
 
+import {
+  verifyLeaderboardSubmissionPayload,
+  checkSubmissionRateLimit
+} from './resultVerification';
+
 /**
  * Pure validation helper for typing test result records before cloud/leaderboard submission.
  * Exported for automated unit tests and client pre-flight validation.
  */
 export function validateTestResultPayload(result: TestResultRecord): { valid: boolean; reason?: string } {
-  if (!result || typeof result !== 'object') {
-    return { valid: false, reason: 'Result record is missing' };
+  const outcome = verifyLeaderboardSubmissionPayload(result);
+  return { valid: outcome.valid, reason: outcome.reason };
+}
+
+export interface NormalizedResultPayloads {
+  safeResultId: string;
+  leaderboardEligible: boolean;
+  userResultPayload: Record<string, any>;
+  rootResultPayload: Record<string, any>;
+  leaderboardPayload: Record<string, any>;
+}
+
+/**
+ * Builds normalized Firestore payloads for:
+ * - Step A: `/users/{uid}/results/{safeResultId}`
+ * - Step B: `/user_results/{uid}_{safeResultId}`
+ * - Step C: `/leaderboard/{uid}_{examId}_{language}`
+ *
+ * Ensures every field, numeric bound, and server timestamp key matches `firestore.rules`.
+ */
+export function buildNormalizedResultPayloads(
+  result: TestResultRecord,
+  user: { uid: string; email?: string | null; displayName?: string | null; photoURL?: string | null },
+  serverTimeValue: unknown = serverTimestamp()
+): NormalizedResultPayloads {
+  const safeResultId = result.id.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+  const netWpm = Math.round(Number(result.metrics.netWpm) * 100) / 100;
+  const grossWpm = Math.round(Number(result.metrics.grossWpm) * 100) / 100;
+  const accuracy = Math.round(Number(result.metrics.accuracy) * 100) / 100;
+  const totalChars = Math.max(1, Math.floor(Number(result.metrics.totalChars) || 1));
+  const correctChars = Math.min(totalChars, Math.max(0, Math.floor(Number(result.metrics.correctChars) || 0)));
+  const incorrectChars = Math.max(0, totalChars - correctChars);
+  const errors = Math.max(0, Math.floor(Number(result.metrics.errors) || 0));
+  const backspaceCount = Math.max(0, Math.floor(Number(result.metrics.backspaceCount) || 0));
+  const keyDepressions = Math.max(totalChars, Math.floor(Number(result.metrics.keyDepressions) || totalChars));
+  const kdph = Math.max(0, Math.floor(Number(result.metrics.kdph) || 0));
+  const rawElapsed = Math.max(1, Math.round(Number(result.metrics.elapsedSeconds) || Number(result.durationSeconds) || 60));
+  const durationSeconds = Math.max(10, Math.min(7200, Math.max(Math.round(Number(result.durationSeconds) || 60), rawElapsed)));
+  const elapsedSeconds = Math.max(1, Math.min(durationSeconds, rawElapsed));
+  const remainingSeconds = Math.max(0, durationSeconds - elapsedSeconds);
+  const safeExamId = String(result.examId || 'general').slice(0, 60);
+  const safeExamName = String(result.examName || 'Typing Test').slice(0, 120);
+  const safePassageId = String(result.passageId || 'default').slice(0, 80);
+  const safePassageTitle = String(result.passageTitle || 'Practice Passage').slice(0, 160);
+  const safeKeyboardLayout = String(result.keyboardLayout || 'standard').slice(0, 40);
+  const safeTimestamp =
+    typeof result.timestamp === 'number' && result.timestamp >= 1000000000000 && result.timestamp <= 9999999999999
+      ? Math.floor(result.timestamp)
+      : Date.now();
+  const safeUsername = (user.displayName?.trim() || user.email?.split('@')[0]?.trim() || 'Candidate').slice(0, 100);
+  const safeEmail = (user.email || '').slice(0, 200);
+  const safePhotoUrl = (user.photoURL || '').slice(0, 2048);
+
+  const normalizedMetrics = {
+    grossWpm,
+    netWpm,
+    accuracy,
+    totalChars,
+    correctChars,
+    incorrectChars,
+    errors,
+    backspaceCount,
+    keyDepressions,
+    elapsedSeconds,
+    remainingSeconds,
+    kdph,
+    isQualified: Boolean(result.metrics.isQualified),
+    grade: String(result.metrics.grade || 'Unqualified').slice(0, 30)
+  };
+
+  const userResultPayload = {
+    id: safeResultId,
+    testId: safeResultId,
+    userId: user.uid,
+    timestamp: safeTimestamp,
+    createdAt: serverTimeValue,
+    examId: safeExamId,
+    examName: safeExamName,
+    language: result.language,
+    keyboardLayout: safeKeyboardLayout,
+    durationSeconds,
+    passageTitle: safePassageTitle,
+    passageId: safePassageId,
+    metrics: normalizedMetrics
+  };
+
+  const rootResultPayload = {
+    ...userResultPayload,
+    userEmail: safeEmail,
+    username: safeUsername,
+    photoURL: safePhotoUrl
+  };
+
+  const leaderboardPayload = {
+    userId: user.uid,
+    testId: safeResultId,
+    username: safeUsername,
+    name: safeUsername,
+    photoURL: safePhotoUrl,
+    avatar: safePhotoUrl,
+    wpm: netWpm,
+    netWpm,
+    grossWpm,
+    accuracy,
+    mistakes: errors,
+    durationSeconds,
+    isQualified: Boolean(result.metrics.isQualified),
+    exam: safeExamName,
+    examId: safeExamId,
+    language: result.language,
+    date: new Date(safeTimestamp).toLocaleDateString('en-IN', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric'
+    }),
+    timestamp: serverTimeValue,
+    updatedAt: serverTimeValue
+  };
+
+  const leaderboardEligible =
+    elapsedSeconds >= 10 &&
+    totalChars >= 25 &&
+    netWpm <= 220 &&
+    grossWpm <= 240 &&
+    accuracy >= 50;
+
+  return {
+    safeResultId,
+    leaderboardEligible,
+    userResultPayload,
+    rootResultPayload,
+    leaderboardPayload
+  };
+}
+
+export interface ResultSyncStepRunnerParams {
+  safeResultId: string;
+  leaderboardEligible: boolean;
+  netWpm: number;
+  accuracy: number;
+  userResultExists: () => Promise<boolean>;
+  writeUserResult: () => Promise<void>;
+  rootResultExists: () => Promise<boolean>;
+  writeRootResult: () => Promise<void>;
+  getExistingLeaderboardEntry: () => Promise<Record<string, any> | null>;
+  writeLeaderboardEntry: () => Promise<void>;
+}
+
+/**
+ * Executes the 3-step result synchronization pipeline with idempotent retry support.
+ * If a previous attempt saved the personal result (Step A) or root audit record (Step B)
+ * before a network failure, retrying skips the already-saved immutable document instead of
+ * attempting an illegal overwrite (`allow update: if false` in firestore.rules) and proceeds
+ * to complete the remaining steps.
+ */
+export async function executeResultSyncSteps(params: ResultSyncStepRunnerParams): Promise<{
+  wroteUserResult: boolean;
+  wroteRootResult: boolean;
+  wroteLeaderboard: boolean;
+}> {
+  let wroteUserResult = false;
+  let wroteRootResult = false;
+  let wroteLeaderboard = false;
+
+  // Step A: Personal immutable result (/users/{uid}/results/{safeResultId})
+  const hasUserResult = await params.userResultExists();
+  if (!hasUserResult) {
+    await params.writeUserResult();
+    wroteUserResult = true;
   }
-  if (!result.id || typeof result.id !== 'string' || result.id.trim().length < 3 || result.id.length > 120) {
-    return { valid: false, reason: 'Invalid result ID' };
+
+  // Step B: Root immutable audit result (/user_results/{uid}_{safeResultId})
+  const hasRootResult = await params.rootResultExists();
+  if (!hasRootResult) {
+    await params.writeRootResult();
+    wroteRootResult = true;
   }
-  if (
-    typeof result.durationSeconds !== 'number' ||
-    !Number.isFinite(result.durationSeconds) ||
-    result.durationSeconds < 10 ||
-    result.durationSeconds > 3600
-  ) {
-    return { valid: false, reason: 'Test duration must be between 10 and 3600 seconds' };
-  }
-  const m = result.metrics;
-  if (!m || typeof m !== 'object') {
-    return { valid: false, reason: 'Metrics object is missing' };
-  }
-  if (typeof m.grossWpm !== 'number' || !Number.isFinite(m.grossWpm) || m.grossWpm < 0 || m.grossWpm > 300) {
-    return { valid: false, reason: 'Gross WPM is out of valid bounds (0..300)' };
-  }
-  if (typeof m.netWpm !== 'number' || !Number.isFinite(m.netWpm) || m.netWpm < 0 || m.netWpm > 250) {
-    return { valid: false, reason: 'Net WPM is out of valid bounds (0..250)' };
-  }
-  if (m.netWpm > m.grossWpm + 0.01) {
-    return { valid: false, reason: 'Net WPM cannot exceed Gross WPM' };
-  }
-  if (typeof m.accuracy !== 'number' || !Number.isFinite(m.accuracy) || m.accuracy < 0 || m.accuracy > 100) {
-    return { valid: false, reason: 'Accuracy must be between 0 and 100' };
-  }
-  if (
-    typeof m.totalChars !== 'number' ||
-    !Number.isFinite(m.totalChars) ||
-    m.totalChars < 0 ||
-    m.totalChars > 50000
-  ) {
-    return { valid: false, reason: 'Total characters out of bounds (0..50000)' };
-  }
-  if (
-    typeof m.correctChars !== 'number' ||
-    !Number.isFinite(m.correctChars) ||
-    m.correctChars < 0 ||
-    m.correctChars > m.totalChars
-  ) {
-    return { valid: false, reason: 'Correct characters cannot exceed total characters' };
-  }
-  if (typeof m.errors !== 'number' || !Number.isFinite(m.errors) || m.errors < 0 || m.errors > 50000) {
-    return { valid: false, reason: 'Errors count out of bounds' };
-  }
-  if (
-    typeof m.incorrectChars === 'number' &&
-    (m.incorrectChars < 0 || m.correctChars + m.incorrectChars > m.totalChars + 1)
-  ) {
-    return { valid: false, reason: 'Character breakdown (correct + incorrect) is inconsistent with totalChars' };
-  }
-  const elapsed =
-    typeof m.elapsedSeconds === 'number' && Number.isFinite(m.elapsedSeconds) && m.elapsedSeconds > 0
-      ? m.elapsedSeconds
-      : result.durationSeconds;
-  if (m.totalChars > 0 && elapsed > 0) {
-    const expectedGrossWpm = Math.round((m.totalChars / 5) / (elapsed / 60));
-    if (Math.abs(m.grossWpm - expectedGrossWpm) > 5) {
-      return {
-        valid: false,
-        reason: 'Reported Gross WPM is inconsistent with total characters typed and elapsed time'
-      };
+
+  // Step C: Public leaderboard entry (/leaderboard/{uid}_{examId}_{language})
+  if (params.leaderboardEligible) {
+    const existingData = await params.getExistingLeaderboardEntry();
+    const isSameTestAlreadyRecorded = existingData?.testId === params.safeResultId;
+
+    if (!isSameTestAlreadyRecorded) {
+      const existingBestNetWpm = existingData
+        ? Number(existingData.netWpm ?? existingData.wpm ?? -1)
+        : -1;
+      const existingBestAcc = existingData ? Number(existingData.accuracy ?? -1) : -1;
+
+      const isBetterScore =
+        !existingData ||
+        params.netWpm > existingBestNetWpm ||
+        (params.netWpm === existingBestNetWpm && params.accuracy >= existingBestAcc);
+
+      if (isBetterScore) {
+        await params.writeLeaderboardEntry();
+        wroteLeaderboard = true;
+      }
     }
   }
-  return { valid: true };
+
+  return { wroteUserResult, wroteRootResult, wroteLeaderboard };
 }
 
 export const StorageService = {
@@ -222,7 +360,7 @@ export const StorageService = {
       const remaining: TestResultRecord[] = [];
       for (const item of queue) {
         try {
-          await this.syncResultToFirestore(item);
+          await this.syncResultToFirestore(item, { isRetry: true });
         } catch {
           remaining.push(item);
         }
@@ -233,19 +371,21 @@ export const StorageService = {
     }
   },
 
-  async syncResultToFirestore(result: TestResultRecord): Promise<void> {
+  async syncResultToFirestore(
+    result: TestResultRecord,
+    options?: { isRetry?: boolean }
+  ): Promise<void> {
     const currentUser = auth.currentUser;
     if (!currentUser) {
       return;
     }
 
-    // 1. Validate score types and realistic bounds
-    const validation = validateTestResultPayload(result);
-    if (!validation.valid) {
-      throw new Error(`Invalid test result payload: ${validation.reason}`);
+    // 1. Validate score types, realistic bounds, and WPM consistency
+    const verification = verifyLeaderboardSubmissionPayload(result, currentUser.uid);
+    if (!verification.valid) {
+      throw new Error(`Invalid test result payload: ${verification.reason}`);
     }
 
-    // 2. Duplicate-submission & rate-limiting protection
     const safeResultId = result.id.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
     if (!safeResultId) {
       throw new Error('Invalid test result identifier');
@@ -253,142 +393,95 @@ export const StorageService = {
     if (syncedResultIds.has(safeResultId)) {
       return;
     }
-    const now = Date.now();
-    if (now - lastCloudSubmissionAt < MIN_SUBMISSION_INTERVAL_MS) {
-      throw new Error('Submission rate limit exceeded. Please wait before submitting another result.');
+
+    // 2. Duplicate-submission & sliding-window rate-limiting protection
+    if (!options?.isRetry) {
+      const now = Date.now();
+      if (now - lastCloudSubmissionAt < MIN_SUBMISSION_INTERVAL_MS) {
+        throw new Error('Submission rate limit exceeded. Please wait before submitting another result.');
+      }
+      const rateCheck = checkSubmissionRateLimit(currentUser.uid, safeResultId, now);
+      if (!rateCheck.allowed) {
+        throw new Error(rateCheck.reason || 'Submission rate limit exceeded.');
+      }
+      lastCloudSubmissionAt = now;
     }
 
-    lastCloudSubmissionAt = now;
-    syncedResultIds.add(safeResultId);
+    // 3. Trusted backend verification endpoint (/api/results/verify) when available
+    let backendLeaderboardEligible = verification.leaderboardEligible;
+    if (typeof window !== 'undefined' && typeof fetch === 'function') {
+      try {
+        const resp = await fetch('/api/results/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uid: currentUser.uid, result })
+        });
+        if (resp.status === 400 || resp.status === 429) {
+          const errBody = await resp.json().catch(() => ({}));
+          throw new Error(errBody.reason || 'Result rejected by server verification');
+        }
+        if (resp.ok) {
+          const verifiedBody = await resp.json();
+          backendLeaderboardEligible = Boolean(verifiedBody.leaderboardEligible);
+        }
+      } catch (e: any) {
+        if (
+          e?.message?.includes('rejected by server') ||
+          e?.message?.includes('Rate limit') ||
+          e?.message?.includes('cooldown')
+        ) {
+          throw e;
+        }
+        // If running on static hosting without /api/results/verify, proceed with Firestore rules enforcement
+      }
+    }
 
-    const netWpm = Math.round(Number(result.metrics.netWpm) * 100) / 100;
-    const grossWpm = Math.round(Number(result.metrics.grossWpm) * 100) / 100;
-    const accuracy = Math.round(Number(result.metrics.accuracy) * 100) / 100;
-    const totalChars = Math.floor(Number(result.metrics.totalChars) || 0);
-    const correctChars = Math.floor(Number(result.metrics.correctChars) || 0);
-    const incorrectChars = Math.max(0, totalChars - correctChars);
-    const errors = Math.floor(Number(result.metrics.errors) || 0);
-    const backspaceCount = Math.floor(Number(result.metrics.backspaceCount) || 0);
-    const keyDepressions = Math.max(totalChars, Math.floor(Number(result.metrics.keyDepressions) || totalChars));
-    const kdph = Math.floor(Number(result.metrics.kdph) || 0);
-    const durationSeconds = Math.floor(Number(result.durationSeconds) || 60);
-    const elapsedSeconds = Math.max(
-      1,
-      Math.min(durationSeconds, Math.floor(Number(result.metrics.elapsedSeconds) || durationSeconds))
+    const payloads = buildNormalizedResultPayloads(
+      result,
+      {
+        uid: currentUser.uid,
+        email: currentUser.email,
+        displayName: currentUser.displayName,
+        photoURL: currentUser.photoURL
+      },
+      serverTimestamp()
     );
 
-    try {
-      // A. Write immutable record to user's personal results subcollection (deterministic doc ID prevents duplicates)
-      const userResultDocRef = doc(db, 'users', currentUser.uid, 'results', safeResultId);
-      await withFirestoreTimeout(
-        setDoc(userResultDocRef, {
-          userId: currentUser.uid,
-          testId: safeResultId,
-          timestamp: result.timestamp,
-          createdAt: serverTimestamp(),
-          examId: result.examId,
-          examName: result.examName,
-          language: result.language,
-          keyboardLayout: result.keyboardLayout || 'standard',
-          durationSeconds,
-          passageTitle: result.passageTitle,
-          passageId: result.passageId,
-          metrics: {
-            grossWpm,
-            netWpm,
-            accuracy,
-            totalChars,
-            correctChars,
-            incorrectChars,
-            errors,
-            backspaceCount,
-            keyDepressions,
-            elapsedSeconds,
-            kdph,
-            isQualified: Boolean(result.metrics.isQualified),
-            grade: result.metrics.grade || 'Unqualified'
-          }
-        }),
-        3000
-      );
+    const userResultDocRef = doc(db, 'users', currentUser.uid, 'results', payloads.safeResultId);
+    const rootResultDocRef = doc(db, 'user_results', `${currentUser.uid}_${payloads.safeResultId}`);
+    const leaderboardDocId = `${currentUser.uid}_${payloads.userResultPayload.examId}_${payloads.userResultPayload.language}`;
+    const leaderboardDocRef = doc(db, 'leaderboard', leaderboardDocId);
 
-      // B. Write immutable audit record to root user_results collection
-      const rootResultDocRef = doc(db, 'user_results', `${currentUser.uid}_${safeResultId}`);
-      await withFirestoreTimeout(
-        setDoc(rootResultDocRef, {
-          userId: currentUser.uid,
-          userEmail: currentUser.email || '',
-          username: currentUser.displayName || 'Candidate',
-          photoURL: currentUser.photoURL || '',
-          testId: safeResultId,
-          timestamp: result.timestamp,
-          createdAt: serverTimestamp(),
-          examId: result.examId,
-          examName: result.examName,
-          language: result.language,
-          keyboardLayout: result.keyboardLayout || 'standard',
-          durationSeconds,
-          passageTitle: result.passageTitle,
-          passageId: result.passageId,
-          metrics: {
-            grossWpm,
-            netWpm,
-            accuracy,
-            totalChars,
-            correctChars,
-            incorrectChars,
-            errors,
-            backspaceCount,
-            keyDepressions,
-            elapsedSeconds,
-            isQualified: Boolean(result.metrics.isQualified)
-          }
-        }),
-        3000
-      );
-
-      // C. Update leaderboard entry ONLY if the test meets minimum threshold and strictly improves the user's personal best
-      if (totalChars >= 25 && elapsedSeconds >= 10) {
-        const leaderboardDocId = `${currentUser.uid}_${result.examId}_${result.language}`;
-        const leaderboardDocRef = doc(db, 'leaderboard', leaderboardDocId);
-        const existingLeaderSnap = await withFirestoreTimeout(getDoc(leaderboardDocRef), 2500);
-        const existingData = existingLeaderSnap.exists() ? existingLeaderSnap.data() : null;
-        const existingBestNetWpm = existingData ? Number(existingData.netWpm ?? -1) : -1;
-        const existingBestAcc = existingData ? Number(existingData.accuracy ?? -1) : -1;
-
-        const isBetterScore =
-          !existingLeaderSnap.exists() ||
-          netWpm > existingBestNetWpm ||
-          (netWpm === existingBestNetWpm && accuracy > existingBestAcc);
-
-        if (isBetterScore) {
-          await withFirestoreTimeout(
-            setDoc(leaderboardDocRef, {
-              userId: currentUser.uid,
-              testId: safeResultId,
-              username: currentUser.displayName || 'Candidate',
-              photoURL: currentUser.photoURL || '',
-              netWpm,
-              grossWpm,
-              accuracy,
-              exam: result.examName,
-              examId: result.examId,
-              language: result.language,
-              date: new Date().toLocaleDateString('en-IN', {
-                day: 'numeric',
-                month: 'short',
-                year: 'numeric'
-              }),
-              timestamp: serverTimestamp()
-            }),
-            3000
-          );
-        }
+    await executeResultSyncSteps({
+      safeResultId: payloads.safeResultId,
+      leaderboardEligible: payloads.leaderboardEligible && backendLeaderboardEligible,
+      netWpm: payloads.userResultPayload.metrics.netWpm,
+      accuracy: payloads.userResultPayload.metrics.accuracy,
+      userResultExists: async () => {
+        const snap = await withFirestoreTimeout(getDoc(userResultDocRef), 2500);
+        return snap.exists();
+      },
+      writeUserResult: async () => {
+        await withFirestoreTimeout(setDoc(userResultDocRef, payloads.userResultPayload), 3000);
+      },
+      rootResultExists: async () => {
+        const snap = await withFirestoreTimeout(getDoc(rootResultDocRef), 2500);
+        return snap.exists();
+      },
+      writeRootResult: async () => {
+        await withFirestoreTimeout(setDoc(rootResultDocRef, payloads.rootResultPayload), 3000);
+      },
+      getExistingLeaderboardEntry: async () => {
+        const snap = await withFirestoreTimeout(getDoc(leaderboardDocRef), 2500);
+        return snap.exists() ? snap.data() : null;
+      },
+      writeLeaderboardEntry: async () => {
+        await withFirestoreTimeout(setDoc(leaderboardDocRef, payloads.leaderboardPayload), 3000);
       }
-    } catch (error) {
-      syncedResultIds.delete(safeResultId);
-      throw error;
-    }
+    });
+
+    // Only mark as fully synced once Steps A, B, and C have all succeeded
+    syncedResultIds.add(payloads.safeResultId);
   },
 
   async fetchCloudUserHistory(uid: string): Promise<TestResultRecord[]> {
@@ -695,6 +788,7 @@ export const StorageService = {
             setDoc(refDoc, {
               code: candidate,
               uid,
+              ownerUid: uid,
               createdAt: serverTimestamp()
             }),
             2500
@@ -705,15 +799,18 @@ export const StorageService = {
             // ignore
           }
           return candidate;
-        } else if (snap.data()?.uid === uid) {
-          try {
-            localStorage.setItem(`tw_owned_ref_code_${uid}`, candidate);
-          } catch {
-            // ignore
+        } else {
+          const existingOwnerUid = snap.data()?.ownerUid || snap.data()?.uid;
+          if (existingOwnerUid === uid) {
+            try {
+              localStorage.setItem(`tw_owned_ref_code_${uid}`, candidate);
+            } catch {
+              // ignore
+            }
+            return candidate;
           }
-          return candidate;
         }
-        // Otherwise snap.data()?.uid !== uid (owned by a different user) -> try next deterministic candidate
+        // Otherwise owned by a different user -> try next deterministic candidate
       } catch {
         // Offline or transient failure
       }
@@ -823,7 +920,7 @@ export const StorageService = {
         };
       }
 
-      const referrerUid = codeSnap.data()?.uid;
+      const referrerUid = codeSnap.data()?.ownerUid || codeSnap.data()?.uid;
       if (!referrerUid || typeof referrerUid !== 'string') {
         return { success: false, message: 'Invalid referral code record.' };
       }
@@ -839,11 +936,12 @@ export const StorageService = {
           referrerUid,
           referrerCode: cleanCode,
           referredUid: currentUser.uid,
-          referredEmail: currentUser.email || newUserEmail || '',
-          referredName: currentUser.displayName || newUserName || 'Candidate',
+          referredEmail: (currentUser.email || newUserEmail || '').slice(0, 200),
+          referredName: (currentUser.displayName || newUserName || 'Candidate').slice(0, 120),
           timestamp: Date.now(),
           daysAwarded: 0,
-          status: 'recorded',
+          rewardDays: 0,
+          status: 'verified',
           createdAt: serverTimestamp()
         }),
         3000
